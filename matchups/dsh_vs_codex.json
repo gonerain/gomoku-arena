@@ -1,0 +1,29 @@
+{
+  "_comment": "第一届比赛：DSH vs Codex。engine 可以写完整命令（含解释器），checkpoint 会以 GOMOKU_MODEL 注入引擎进程。",
+  "black": {
+    "engine": "C:\\Python313\\python.exe D:\\Code\\dsh_gomoku\\arena\\engines\\py_trained\\engine.py",
+    "pid": "dsh",
+    "name": "DSH",
+    "version": "v1",
+    "checkpoint": "D:\\Code\\dsh_gomoku\\runs\\az\\checkpoints\\chosen.pt",
+    "meta": {
+      "algo": "alphazero-lite (self-play PUCT MCTS + policy/value CNN)",
+      "params": 243309,
+      "self_play_games": 736,
+      "positions": 12585,
+      "grad_steps": 460,
+      "self_play_sims": 32,
+      "inference_sims": 256,
+      "trained_seconds": 417.9,
+      "budget_cap_seconds": 3600,
+      "device": "cpu"
+    }
+  },
+  "white": {
+    "engine": "TODO_待 Codex 提供",
+    "pid": "codex",
+    "name": "Codex",
+    "version": "TODO",
+    "checkpoint": "TODO"
+  }
+}

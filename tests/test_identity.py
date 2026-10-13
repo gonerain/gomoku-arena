@@ -282,6 +282,39 @@ def test_gameview_in_bounds() -> None:
           "GameView.is_empty 正确反映占位情况")
 
 
+def test_external_command_paths() -> None:
+    """外部引擎要以完整命令形式接入（常装在别的 Python 环境里）。
+
+    回归点：platform 曾给外部路径又套了一层 sys.executable，变成
+    `python.exe python.exe engine.py`；也曾忘记把 checkpoint 写进 GOMOKU_MODEL。
+    """
+    from gomoku_arena.cli import build_external_participant, build_participant
+    from gomoku_arena.server import participant_for
+
+    interpreter = sys.executable
+    script = ROOT / "engines" / "py_random" / "engine.py"
+    command = f"{interpreter} {script}"
+    checkpoint = str(MODEL_A)
+
+    via_cli = build_participant(command, "dsh", checkpoint, "v1")
+    check(via_cli.spec["cmd"] == [interpreter, str(script)],
+          "完整命令不再被重复套一层解释器", str(via_cli.spec["cmd"]))
+    check(via_cli.spec["env"].get("GOMOKU_MODEL") == checkpoint,
+          "完整命令形式也会把 checkpoint 注入 GOMOKU_MODEL")
+    check(via_cli.pid == "dsh" and via_cli.name == "dsh",
+          "完整命令形式的身份显示为参赛方 id", f"{via_cli.pid}/{via_cli.name}")
+
+    via_config = participant_for(command, pid="codex", version="v9", checkpoint=checkpoint)
+    check(via_config.spec["cmd"] == [interpreter, str(script)]
+          and via_config.spec["env"].get("GOMOKU_MODEL") == checkpoint,
+          "配置文件路径（participant_for）同样支持完整命令",
+          f"cmd={via_config.spec['cmd']}")
+
+    via_bare = build_external_participant(str(script), pid="bare")
+    check(via_bare.spec["cmd"] == [sys.executable, str(script)],
+          "只给 .py 路径时用当前解释器执行", str(via_bare.spec["cmd"]))
+
+
 def test_no_silent_fallback_in_trained() -> None:
     """py_trained 必须在权重失败时显式退出，不能静默退回启发式。"""
     source = (ROOT / "engines" / "py_trained" / "engine.py").read_text(encoding="utf-8")
@@ -307,6 +340,7 @@ def main() -> int:
         test_infer_implemented_detection,
         test_infer_implemented_accepts_real_code,
         test_gameview_in_bounds,
+        test_external_command_paths,
         test_no_silent_fallback_in_trained,
     ):
         try:

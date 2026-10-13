@@ -120,9 +120,20 @@ def participant_for(
     meta: dict | None = None,
     move_delay_ms: int | None = None,
 ) -> Participant:
-    """按"引擎程序 + 参赛方身份 + 权重"组装一个参赛方。"""
+    """按"引擎程序 + 参赛方身份 + 权重"组装一个参赛方。
+
+    engine 可以是注册表里的名字（random/greedy/trained/...），
+    也可以是一条外部引擎命令路径（首个 token 是 .py 脚本或可执行文件）。
+    """
     if engine not in ENGINES:
-        raise ValueError(f"引擎程序不存在: {engine!r}，可选 {sorted(ENGINES)}")
+        from .cli import build_external_participant
+
+        # 展示名交给 build_external_participant 按 name/pid 推导，
+        # 不要用命令里的解释器名（python.exe → "python"）
+        return build_external_participant(
+            engine, pid=pid, checkpoint=checkpoint, version=version,
+            name=name, move_delay_ms=move_delay_ms,
+        )
     base = ENGINES[engine]
     resolved_pid = pid or name or base["name"]
     merged_meta = {**(base.get("meta") or {}), **(meta or {})}

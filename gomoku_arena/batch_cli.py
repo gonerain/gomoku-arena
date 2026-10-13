@@ -27,7 +27,7 @@ from pathlib import Path
 from .batch import Batch
 from .match import Match, MatchConfig, Participant
 from .rules import BOARD_SIZE
-from .server import RECORDS_PATH, Store, participant_for
+from .server import RECORDS_PATH, Store, _optional_int, participant_for
 
 CONFIG_TEMPLATE = {
     "_comment": "参赛方配置：engine=引擎程序(适配器)，pid=参赛方唯一标识，checkpoint=模型权重",
@@ -54,6 +54,7 @@ def participant_from_config(raw, fallback_engine: str) -> Participant:
         version=raw.get("version"),
         checkpoint=raw.get("checkpoint"),
         meta=raw.get("meta") if isinstance(raw.get("meta"), dict) else None,
+        move_delay_ms=_optional_int(raw.get("move_delay_ms")),
     )
 
 

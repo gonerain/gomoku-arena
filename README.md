@@ -202,17 +202,35 @@ DSH 与 Codex 的推荐做法：各自 fork 一份 `py_trained/engine.py`（或�
 
 平台侧没有任何"允许占位实现"的开关，也没有静默回退路径。
 
-配置方式有两种，都不修改全局注册表：
+配置方式有两种，都不修改全局注册表。**外部引擎可以直接写完整命令**（常用于引擎装在别的
+Python 环境里，或引擎代码不在本仓库）：
 
 ```bash
-# CLI：直接指定
+# ① CLI：注册表引擎 + 各自权重
 python -m gomoku_arena.batch_cli --black-engine trained --black-pid dsh \
     --black-checkpoint checkpoints/dsh_ppo_v3.pt --white-engine trained --white-pid codex \
     --white-checkpoint checkpoints/codex_az_v7.pt --games 20 --save
 
-# JSON 配置（推荐，见 matchups/dsh_vs_codex.example.json）
+# ② CLI：外部引擎（完整命令含解释器；checkpoint 会被注入 GOMOKU_MODEL）
+python -m gomoku_arena.cli \
+    --black "C:\Python313\python.exe D:\Code\dsh_gomoku\arena\engines\py_trained\engine.py" \
+    --black-pid dsh --black-version v1 \
+    --black-checkpoint "D:\Code\dsh_gomoku\runs\az\checkpoints\chosen.pt" \
+    --white greedy --white-pid baseline --move-timeout 2000 --board
+
+# ③ JSON 配置（推荐，见 matchups/ 下的实例；engine 字段同样支持完整命令）
 python -m gomoku_arena.batch_cli --config matchups/dsh_vs_codex.json --games 20 --save
 ```
+
+engine 字段的两种写法：
+
+| 写法 | 含义 |
+|---|---|
+| `"trained"` | 注册表里的引擎程序（`random`/`greedy`/`trained`/`ckpt_test`/`test_crash`） |
+| `"C:\\Python313\\python.exe D:\\...\\engine.py"` | 外部引擎的完整命令，原样使用给定解释器 |
+| `"D:\\...\\engine.py"` | 外部脚本，用平台自身的解释器执行 |
+
+无论哪种写法，`checkpoint` 都会被注入到引擎进程的 `GOMOKU_MODEL` 环境变量。
 
 ```json
 {
