@@ -1,5 +1,5 @@
 {
-  "_comment": "第一届比赛：DSH vs Codex。engine 可以写完整命令（含解释器），checkpoint 会以 GOMOKU_MODEL 注入引擎进程。",
+  "_comment": "第一届比赛：DSH vs Codex。engine 写含解释器的完整命令；checkpoint 由平台以 GOMOKU_MODEL 注入引擎进程。",
   "black": {
     "engine": "C:\\Python313\\python.exe D:\\Code\\dsh_gomoku\\arena\\engines\\py_trained\\engine.py",
     "pid": "dsh",
@@ -16,14 +16,28 @@
       "inference_sims": 256,
       "trained_seconds": 417.9,
       "budget_cap_seconds": 3600,
-      "device": "cpu"
+      "device": "cpu",
+      "reported": "自博弈 736 局 / 12585 局面 / 460 梯度步（32 sims 自博弈，256 sims 推理）"
     }
   },
   "white": {
-    "engine": "TODO_待 Codex 提供",
+    "engine": "C:\\Users\\Gonerain\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe D:\\Code\\codex_gomoku\\engine.py",
     "pid": "codex",
     "name": "Codex",
-    "version": "TODO",
-    "checkpoint": "TODO"
+    "version": "v1",
+    "checkpoint": "D:\\Code\\codex_gomoku\\final_model.json",
+    "meta": {
+      "algo": "feature-based policy gradient + threat search (no MCTS)",
+      "training_interactions": 6766920,
+      "grad_updates": 6305,
+      "mcts_sims": 0,
+      "budget_ms": 80,
+      "trained_seconds": 2182.55,
+      "wallclock_seconds": 3260.89,
+      "python": "3.12.14",
+      "numpy": "2.3.5",
+      "device": "cpu",
+      "reported": "混合训练 >=151337 局（当前策略自博弈 50%，其余历史策略与 Greedy）/ 6766920 交互步 / 6305 梯度更新"
+    }
   }
 }

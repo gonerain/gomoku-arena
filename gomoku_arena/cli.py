@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .match import Match, MatchConfig, Participant, participant_from_spec
 from .rules import BOARD_SIZE, PROTOCOL, replay
-from .server import ENGINES, Store, launch_spec, participant_for
+from .server import ENGINES, Store, launch_spec, load_participants, participant_for
 
 REASON_TEXT = {
     "five": "五连获胜",
@@ -93,6 +93,8 @@ def build_participant(
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="gomoku_arena.cli", description="五子棋对抗：命令行跑单局")
+    parser.add_argument("--config", default=None,
+                        help="参赛方配置文件（JSON），与 batch_cli 的 --config 同格式")
     parser.add_argument("--black", default="random", help="黑方引擎（名称或 .py 路径）")
     parser.add_argument("--white", default="greedy", help="白方引擎（名称或 .py 路径）")
     parser.add_argument("--black-pid", default=None, help="黑方参赛方 id（同一引擎不同权重时必须给）")
@@ -121,12 +123,15 @@ def main(argv=None) -> int:
         game_timeout_ms=args.game_timeout,
     )
     try:
-        black = build_participant(
-            args.black, args.black_pid, args.black_checkpoint, args.black_version
-        )
-        white = build_participant(
-            args.white, args.white_pid, args.white_checkpoint, args.white_version
-        )
+        if args.config:
+            black, white = load_participants(args.config)
+        else:
+            black = build_participant(
+                args.black, args.black_pid, args.black_checkpoint, args.black_version
+            )
+            white = build_participant(
+                args.white, args.white_pid, args.white_checkpoint, args.white_version
+            )
         match = Match(black, white, config)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

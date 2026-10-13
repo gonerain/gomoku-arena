@@ -27,10 +27,10 @@ from pathlib import Path
 from .batch import Batch
 from .match import Match, MatchConfig, Participant
 from .rules import BOARD_SIZE
-from .server import RECORDS_PATH, Store, _optional_int, participant_for
+from .server import RECORDS_PATH, Store, load_participants, participant_for
 
 CONFIG_TEMPLATE = {
-    "_comment": "参赛方配置：engine=引擎程序(适配器)，pid=参赛方唯一标识，checkpoint=模型权重",
+    "_comment": "参赛方配置：engine=引擎程序(适配器或含解释器的完整命令)，pid=参赛方唯一标识，checkpoint=模型权重",
     "black": {"engine": "trained", "pid": "dsh", "name": "DSH",
               "version": "v3", "checkpoint": "checkpoints/dsh_ppo_v3.pt",
               "meta": {"algo": "ppo", "episodes": 12000, "budget": "2e6 steps"}},
@@ -41,35 +41,18 @@ CONFIG_TEMPLATE = {
 
 
 def participant_from_config(raw, fallback_engine: str) -> Participant:
-    """从配置项构造参赛方。字符串视为引擎程序名。"""
-    if isinstance(raw, str):
-        return participant_for(raw)
-    if not isinstance(raw, dict):
-        raise SystemExit(f"参赛方配置格式错误: {raw!r}")
-    engine = raw.get("engine") or fallback_engine
-    return participant_for(
-        engine,
-        pid=raw.get("pid") or raw.get("id"),
-        name=raw.get("name"),
-        version=raw.get("version"),
-        checkpoint=raw.get("checkpoint"),
-        meta=raw.get("meta") if isinstance(raw.get("meta"), dict) else None,
-        move_delay_ms=_optional_int(raw.get("move_delay_ms")),
-    )
+    """兼容旧调用点：转发到 server.participant_from_config。"""
+    from .server import participant_from_config as _impl
+
+    return _impl(raw, fallback_engine)
 
 
 def build_participants(args) -> tuple[Participant, Participant]:
     if args.config:
-        path = Path(args.config)
-        if not path.is_file():
-            raise SystemExit(f"配置文件不存在: {path}")
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            raise SystemExit(f"配置文件不是合法 JSON: {exc}") from exc
-        black = participant_from_config(data.get("black"), args.black_engine)
-        white = participant_from_config(data.get("white"), args.white_engine)
-        return black, white
+            return load_participants(args.config)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
 
     black = participant_for(
         args.black_engine, pid=args.black_pid, name=args.black_name,

@@ -219,6 +219,48 @@ def _optional_int(value):
         return None
 
 
+def participant_from_config(raw, fallback_engine: str = "random") -> Participant:
+    """从配置项构造参赛方（配置文件与 HTTP 请求共用）。
+
+    字符串视为引擎名或外部命令；对象取 engine/pid/name/version/checkpoint/meta/move_delay_ms。
+    """
+    if raw is None:
+        return participant_for(fallback_engine)
+    if isinstance(raw, str):
+        return participant_for(raw)
+    if not isinstance(raw, dict):
+        raise ValueError(f"参赛方配置格式错误，应为对象或字符串: {raw!r}")
+    engine = raw.get("engine") or raw.get("engine_key") or raw.get("program") or fallback_engine
+    return participant_for(
+        engine,
+        pid=raw.get("pid") or raw.get("id"),
+        name=raw.get("name"),
+        version=raw.get("version"),
+        checkpoint=raw.get("checkpoint"),
+        meta=raw.get("meta") if isinstance(raw.get("meta"), dict) else None,
+        move_delay_ms=_optional_int(raw.get("move_delay_ms")),
+    )
+
+
+def load_participants(path) -> tuple[Participant, Participant]:
+    """从 JSON 配置文件读取双方参赛方。见 matchups/ 下的实例。"""
+    from pathlib import Path
+
+    file = Path(path)
+    if not file.is_file():
+        raise ValueError(f"配置文件不存在: {file}")
+    try:
+        data = json.loads(file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"配置文件不是合法 JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("配置文件顶层必须是 JSON 对象")
+    return (
+        participant_from_config(data.get("black")),
+        participant_from_config(data.get("white")),
+    )
+
+
 class Store:
     """比赛记录：追加式 JSONL，每局一行。启动时读回，用于列表、回放与统计。"""
 
