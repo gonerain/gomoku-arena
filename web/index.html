@@ -27,14 +27,17 @@
   #banner {
     margin-bottom: 10px; padding: 9px 12px; border-radius: 6px; font-size: 13.5px;
     background: var(--panel2); color: var(--dim); min-height: 38px;
-    display: flex; align-items: center; gap: 8px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   }
   #banner.win { color: var(--ok); }
   #banner.draw { color: var(--warn); }
   #banner.bad { color: var(--bad); }
-  aside { flex: 1 1 340px; min-width: 320px; display: flex; flex-direction: column; gap: 14px; }
+  #banner .tag { background: var(--accent); color: #fff; border-radius: 999px;
+                 padding: 1px 9px; font-size: 11.5px; font-weight: 600; }
+  aside { flex: 1 1 360px; min-width: 330px; display: flex; flex-direction: column; gap: 14px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
-  .card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--dim); letter-spacing: .04em; text-transform: uppercase; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--dim);
+             letter-spacing: .04em; text-transform: uppercase; }
   .player { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
   .player + .player { border-top: 1px dashed var(--line); }
   .dot { width: 15px; height: 15px; border-radius: 50%; flex: 0 0 auto; }
@@ -42,10 +45,11 @@
   .dot.white { background: radial-gradient(circle at 34% 30%, #ffffff, #b7bcc9 75%); }
   .player .name { font-weight: 600; }
   .player .ver { color: var(--dim); font-size: 12px; }
-  .player .meta { color: var(--dim); font-size: 11.5px; margin-left: auto; text-align: right; max-width: 45%; }
+  .player .meta { color: var(--dim); font-size: 11.5px; margin-left: auto; text-align: right; max-width: 50%;
+                  overflow-wrap: anywhere; }
   .player.turn { background: rgba(76,141,255,.09); border-radius: 6px; padding-left: 6px; padding-right: 6px; margin: 0 -6px; }
   .row { display: flex; gap: 10px; align-items: center; margin-bottom: 9px; }
-  .row label { flex: 0 0 62px; color: var(--dim); font-size: 12.5px; }
+  .row label { flex: 0 0 68px; color: var(--dim); font-size: 12.5px; }
   select, input, button {
     font: inherit; background: var(--panel2); color: var(--text);
     border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
@@ -55,7 +59,9 @@
   button:hover { filter: brightness(1.1); }
   button:disabled { opacity: .5; cursor: default; filter: none; }
   button.ghost { background: var(--panel2); border-color: var(--line); color: var(--text); font-weight: 500; }
-  .stat { display: flex; justify-content: space-between; font-size: 12.5px; padding: 3px 0; color: var(--dim); }
+  button.wide { width: 100%; }
+  .btn-row { display: flex; gap: 8px; }
+  .stat { display: flex; justify-content: space-between; font-size: 12.5px; padding: 3px 0; color: var(--dim); gap: 10px; }
   .stat b { color: var(--text); font-weight: 600; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -66,17 +72,23 @@
   .pill { padding: 1px 7px; border-radius: 999px; font-size: 11px; background: var(--panel2); color: var(--dim); }
   .pill.black { color: #cbd5e1; } .pill.white { color: #fff; background: #3a4152; }
   .pill.bad { color: var(--bad); } .pill.warn { color: var(--warn); }
-  .scroll { max-height: 260px; overflow-y: auto; }
+  .pill.base { color: var(--warn); }
+  .scroll { max-height: 250px; overflow-y: auto; }
   .playbar { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
   .playbar input[type=range] { flex: 1; padding: 0; }
+  .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin: 8px 0; }
+  .bar > i { display: block; height: 100%; background: var(--accent); width: 0; }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 6px; }
+  .err { color: var(--bad); font-size: 12px; margin-top: 8px; min-height: 16px; }
   footer { color: var(--dim); font-size: 12px; padding: 0 20px 24px; }
   code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 <header>
   <h1>五子棋 RL 竞技场</h1>
-  <span class="rule">15×15 · 黑先 · ⑤连及以上获胜 · 双方无禁手 · 无开局规则</span>
+  <span class="rule" id="rule-line">规则加载中…</span>
 </header>
 
 <main>
@@ -87,7 +99,7 @@
 
   <aside>
     <div class="card">
-      <h2>对局</h2>
+      <h2>当前显示</h2>
       <div id="players">
         <div class="player" id="p-black"><span class="dot black"></span>
           <span class="name">—</span><span class="ver"></span><span class="meta"></span></div>
@@ -103,21 +115,31 @@
     </div>
 
     <div class="card">
-      <h2>开新局</h2>
+      <h2>开新局 / 批量对战</h2>
       <div class="row"><label>黑方</label><select id="in-black"></select></div>
       <div class="row"><label>白方</label><select id="in-white"></select></div>
       <div class="row"><label>每步 ms</label><input id="in-move" type="number" value="1000" min="50" step="50"></div>
       <div class="row"><label>整局 ms</label><input id="in-game" type="number" value="120000" min="1000" step="1000"></div>
+      <div class="row"><label>局数</label><input id="in-games" type="number" value="10" min="1" max="500" step="1"></div>
       <div class="row"><label>随机种子</label><input id="in-seed" type="number" placeholder="留空则随机"></div>
-      <button id="btn-start" style="width:100%">开始对局</button>
-      <div id="start-err" style="color:var(--bad); font-size:12px; margin-top:8px"></div>
+      <div class="btn-row">
+        <button id="btn-start" style="flex:1">单局</button>
+        <button id="btn-batch" style="flex:1" class="ghost">批量（交换先手）</button>
+      </div>
+      <div class="err" id="start-err"></div>
+      <div id="batch-panel" style="display:none">
+        <div class="bar"><i id="batch-bar"></i></div>
+        <div class="stat"><span>批量进度</span><b id="batch-progress">—</b></div>
+        <div id="batch-table"></div>
+        <button class="ghost wide" id="btn-batch-cancel" style="margin-top:8px">中止批量</button>
+      </div>
     </div>
 
     <div class="card">
-      <h2>比赛记录 <span id="rec-count" class="pill">0</span></h2>
+      <h2>最近对局 <span id="rec-count" class="pill">0</span></h2>
       <div class="scroll">
         <table>
-          <thead><tr><th>时间</th><th>黑</th><th>白</th><th>结果</th><th>步</th></tr></thead>
+          <thead><tr><th>时间</th><th>黑</th><th>白</th><th>结果</th><th class="num">步</th></tr></thead>
           <tbody id="rec-body"></tbody>
         </table>
       </div>
@@ -125,47 +147,66 @@
         <button class="ghost" id="btn-prev">◀</button>
         <input id="slider" type="range" min="0" max="0" value="0">
         <button class="ghost" id="btn-next">▶</button>
-        <button class="ghost" id="btn-live">回到最新</button>
+        <button class="ghost" id="btn-live">回到实时</button>
       </div>
       <div class="stat"><span>回放位置</span><b id="play-pos">实时</b></div>
+      <div class="hint">历史回放期间，实时对局仍在后台进行，不会被覆盖。</div>
     </div>
 
     <div class="card">
-      <h2>总战绩</h2>
-      <div class="stat"><span>总局数</span><b id="t-total">0</b></div>
+      <h2>完整统计 <span class="pill" id="stats-scope">全部棋谱</span></h2>
+      <div class="stat"><span>总对局</span><b id="t-total">0</b></div>
       <div class="stat"><span>黑胜 / 白胜 / 平</span><b id="t-wl">0 / 0 / 0</b></div>
       <div class="stat"><span>异常结束</span><b id="t-bad">0</b></div>
+      <div id="t-engines" style="margin-top:10px"></div>
     </div>
   </aside>
 </main>
 
 <footer>
-  引擎协议：stdin 收 JSON、stdout 发 JSON、日志走 stderr —— 见 <code>platform/match.py</code> 的 PROTOCOL。
-  棋谱：<code>records/games.jsonl</code>，每局一行。
+  引擎协议：stdin 收 JSON、stdout 发 JSON、日志走 stderr —— 见 <code>gomoku_arena/rules.py</code> 的 PROTOCOL。
+  棋谱：<code>records/games.jsonl</code>，每局一行。回放数据来自
+  <code>/api/games/&lt;id&gt;</code>，统计来自 <code>/api/stats</code>（覆盖全部棋谱）。
 </footer>
 
 <script>
-const SIZE = 15, CELL = 40, PAD = 20, R = 17;
+const STAR_RATIO = [[0.2,0.2],[0.8,0.2],[0.2,0.8],[0.8,0.8],[0.5,0.5]];
+const DIRS = [[1,0],[0,1],[1,1],[1,-1]];
+const POLL_LIVE_MS = 350, POLL_HISTORY_MS = 5000, POLL_BATCH_MS = 1000;
+
 const canvas = document.getElementById('board');
 const g = canvas.getContext('2d');
-const STAR = [[3,3],[11,3],[3,11],[11,11],[7,7]];
-const DIRS = [[1,0],[0,1],[1,1],[1,-1]];
-
-let current = null;      // 当前展示的对局状态
-let replayIndex = null;  // null = 实时跟随；数字 = 回放停在第 N 手
-let lastGames = [];      // 历史列表
-let selectedId = null;
-
 const $ = (id) => document.getElementById(id);
 
-/* ---------------- 绘制 ---------------- */
+let geom = { size: 15, cell: 40, pad: 20, r: 17, stars: [] };
+let liveGame = null;      // 实时对局的完整状态（轮询所得）
+let replayGame = null;    // 正在回放的历史对局；非 null 时画它，不被轮询覆盖
+let replayIndex = null;   // null = 跟随末尾；数字 = 停在第 N 手
+let recentGames = [];     // 最近对局列表（不含着法）
+let stats = null;         // 完整统计（/api/stats）
+let activeBatch = null;   // 正在跟踪的批量对战 id
+let lastLiveId = null;
 
-function px(x) { return PAD + x * CELL; }
-function py(y) { return PAD + (SIZE - 1 - y) * CELL; }   // y 向上增长
+/* ---------------- 棋盘几何与绘制 ---------------- */
+
+function setupGeometry(size) {
+  if (geom.size === size) return;
+  const total = 600;
+  const pad = Math.round(total * 0.033);
+  const cell = (total - pad * 2) / (size - 1);
+  geom = {
+    size, cell, pad,
+    r: Math.max(4, Math.round(cell * 0.42)),
+    stars: STAR_RATIO.map(([fx, fy]) => [Math.round(fx * (size - 1)), Math.round(fy * (size - 1))]),
+  };
+}
+
+function px(x) { return geom.pad + x * geom.cell; }
+function py(y) { return geom.pad + (geom.size - 1 - y) * geom.cell; }
 
 function buildBoard(moves) {
-  const grid = Array.from({length: SIZE}, () => new Array(SIZE).fill(0));
-  const order = Array.from({length: SIZE}, () => new Array(SIZE).fill(0));
+  const grid = Array.from({length: geom.size}, () => new Array(geom.size).fill(0));
+  const order = Array.from({length: geom.size}, () => new Array(geom.size).fill(0));
   moves.forEach((m, i) => { grid[m.y][m.x] = m.color === 'black' ? 1 : 2; order[m.y][m.x] = i + 1; });
   return {grid, order};
 }
@@ -173,13 +214,12 @@ function buildBoard(moves) {
 function findWinLine(moves) {
   const {grid} = buildBoard(moves);
   for (let i = moves.length - 1; i >= 0; i--) {
-    const m = moves[i];
-    const code = m.color === 'black' ? 1 : 2;
+    const m = moves[i], code = m.color === 'black' ? 1 : 2;
     for (const [dx, dy] of DIRS) {
       const line = [[m.x, m.y]];
       for (const s of [1, -1]) {
         let cx = m.x + dx * s, cy = m.y + dy * s;
-        while (cx >= 0 && cx < SIZE && cy >= 0 && cy < SIZE && grid[cy][cx] === code) {
+        while (cx >= 0 && cx < geom.size && cy >= 0 && cy < geom.size && grid[cy][cx] === code) {
           line.push([cx, cy]); cx += dx * s; cy += dy * s;
         }
       }
@@ -191,159 +231,147 @@ function findWinLine(moves) {
 
 function drawStone(cx, cy, code, label, opts = {}) {
   g.save();
-  g.beginPath();
-  g.arc(cx, cy, R, 0, Math.PI * 2);
-  const grad = g.createRadialGradient(cx - R * 0.35, cy - R * 0.35, R * 0.15, cx, cy, R);
+  g.beginPath(); g.arc(cx, cy, geom.r, 0, Math.PI * 2);
+  const grad = g.createRadialGradient(cx - geom.r * 0.35, cy - geom.r * 0.35, geom.r * 0.15, cx, cy, geom.r);
   if (code === 1) { grad.addColorStop(0, '#7b8494'); grad.addColorStop(1, '#0b0d12'); }
   else { grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#b9bec9'); }
   g.fillStyle = grad;
   g.shadowColor = 'rgba(0,0,0,.45)'; g.shadowBlur = 5; g.shadowOffsetY = 2;
   g.fill();
   g.restore();
-
   if (opts.last) {
-    g.beginPath(); g.arc(cx, cy, R + 3, 0, Math.PI * 2);
+    g.beginPath(); g.arc(cx, cy, geom.r + 3, 0, Math.PI * 2);
     g.strokeStyle = '#4c8dff'; g.lineWidth = 3; g.stroke();
   }
   if (label) {
     g.fillStyle = code === 1 ? 'rgba(255,255,255,.82)' : 'rgba(20,24,34,.75)';
-    g.font = '600 13px "Segoe UI", sans-serif';
+    g.font = `600 ${Math.max(9, Math.round(geom.r * 0.78))}px "Segoe UI", sans-serif`;
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.fillText(label, cx, cy + 0.5);
   }
 }
 
 function draw() {
-  // 棋盘底色
+  const game = replayGame || liveGame;
+  const n = geom.size;
   const wood = g.createLinearGradient(0, 0, canvas.width, canvas.height);
   wood.addColorStop(0, '#dcb277'); wood.addColorStop(1, '#c99a5c');
   g.fillStyle = wood; g.fillRect(0, 0, canvas.width, canvas.height);
 
-  // 网格
   g.strokeStyle = 'rgba(60,38,12,.65)'; g.lineWidth = 1;
-  for (let i = 0; i < SIZE; i++) {
-    g.beginPath(); g.moveTo(px(0), py(i)); g.lineTo(px(SIZE - 1), py(i)); g.stroke();
-    g.beginPath(); g.moveTo(px(i), py(0)); g.lineTo(px(i), py(SIZE - 1)); g.stroke();
+  for (let i = 0; i < n; i++) {
+    g.beginPath(); g.moveTo(px(0), py(i)); g.lineTo(px(n - 1), py(i)); g.stroke();
+    g.beginPath(); g.moveTo(px(i), py(0)); g.lineTo(px(i), py(n - 1)); g.stroke();
   }
   g.strokeStyle = 'rgba(60,38,12,.95)'; g.lineWidth = 2;
-  g.strokeRect(px(0), py(SIZE - 1), CELL * (SIZE - 1), CELL * (SIZE - 1));
+  g.strokeRect(px(0), py(n - 1), geom.cell * (n - 1), geom.cell * (n - 1));
 
-  // 星位
   g.fillStyle = 'rgba(60,38,12,.9)';
-  for (const [sx, sy] of STAR) {
+  for (const [sx, sy] of geom.stars) {
     g.beginPath(); g.arc(px(sx), py(sy), 3.2, 0, Math.PI * 2); g.fill();
   }
 
-  // 坐标
   g.fillStyle = 'rgba(60,38,12,.85)';
   g.font = '11px "Segoe UI", sans-serif';
   g.textAlign = 'center'; g.textBaseline = 'middle';
-  for (let i = 0; i < SIZE; i++) {
-    g.fillText(String.fromCharCode(65 + i), px(i), py(SIZE - 1) + PAD * 0.75);
-    g.fillText(String(i + 1), px(0) - PAD * 0.75, py(i));
+  for (let i = 0; i < n; i++) {
+    g.fillText(String.fromCharCode(65 + i), px(i), py(n - 1) + geom.pad * 0.75);
+    g.fillText(String(i + 1), px(0) - geom.pad * 0.75, py(i));
   }
 
-  if (!current) return;
-
-  const total = current.moves ? current.moves.length : 0;
+  if (!game) return;
+  const total = (game.moves || []).length;
   const upto = replayIndex === null ? total : Math.min(replayIndex, total);
-  const moves = (current.moves || []).slice(0, upto);
+  const moves = (game.moves || []).slice(0, upto);
   const {grid, order} = buildBoard(moves);
-
-  // 最后 1 手用高亮环标出
+  const showNumbers = total <= 80 && geom.size <= 15;
   const last = moves.length ? moves[moves.length - 1] : null;
 
   g.textAlign = 'center'; g.textBaseline = 'middle';
-  for (let y = 0; y < SIZE; y++) {
-    for (let x = 0; x < SIZE; x++) {
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
       if (!grid[y][x]) continue;
       const isLast = last && last.x === x && last.y === y && replayIndex === null;
-      drawStone(px(x), py(y), grid[y][x], String(order[y][x]), {last: isLast});
+      drawStone(px(x), py(y), grid[y][x], showNumbers ? String(order[y][x]) : '', {last: isLast});
     }
   }
 
-  // 终局五连高亮（仅当回放到底）
-  if (replayIndex === null && current.result && current.result.winner) {
-    const line = findWinLine(current.moves || []);
+  if (replayIndex === null && game.result && game.result.winner) {
+    const line = findWinLine(game.moves || []);
     if (line) {
       g.strokeStyle = '#34d399'; g.lineWidth = 4; g.lineCap = 'round';
       for (const [lx, ly] of line) {
-        g.beginPath(); g.arc(px(lx), py(ly), R + 4, 0, Math.PI * 2); g.stroke();
+        g.beginPath(); g.arc(px(lx), py(ly), geom.r + 4, 0, Math.PI * 2); g.stroke();
       }
     }
   }
 }
 
-/* ---------------- 状态面板 ---------------- */
+/* ---------------- 文案 ---------------- */
 
 const REASON_TEXT = {
   five: '五连获胜',
   draw: '棋盘已满，平局',
-  timeout: '超时判负',
+  timeout: '单步超时判负',
+  game_timeout: '整局墙钟上限用完，无胜负中止',
   crash: '进程崩溃判负',
   illegal_move: '非法落子判负',
   bad_output: '输出不是合法协议帧，判负',
   protocol: '协议违规判负',
   resign: '主动认输',
   start_failed: '引擎启动失败',
-  aborted: '对局中止',
+  aborted: '对局中止（无法可靠归责）',
   platform_error: '平台内部错误',
 };
+const shortReason = (r) => REASON_TEXT[r] || r || '—';
 
 function playerCard(el, p, isTurn) {
   if (!p) return;
   el.querySelector('.name').textContent = p.name || '—';
   el.querySelector('.ver').textContent = p.version || '';
-  const meta = p.meta && Object.keys(p.meta).length
-    ? Object.entries(p.meta).map(([k, v]) => `${k}=${v}`).join(' ')
-    : '';
-  el.querySelector('.meta').textContent = meta;
+  const meta = p.meta || {};
+  const bits = [];
+  if (meta.baseline) bits.push('基线·非RL');
+  else if (meta.algo) bits.push(meta.algo);
+  if (p.checkpoint && p.checkpoint !== 'none') bits.push('ckpt=' + p.checkpoint);
+  if (meta.episodes != null) bits.push('ep=' + meta.episodes);
+  if (meta.sims != null) bits.push('sims=' + meta.sims);
+  if (meta.budget) bits.push('budget=' + meta.budget);
+  el.querySelector('.meta').textContent = bits.join(' · ');
   el.classList.toggle('turn', !!isTurn);
 }
 
-function shortReason(r) { return REASON_TEXT[r] || r || '—'; }
-
 function render() {
-  if (!current) {
-    $('banner').textContent = '暂无对局。点右侧「开始对局」，或启动时加 --autostart。';
-    $('banner').className = '';
+  const game = replayGame || liveGame;
+  const banner = $('banner');
+  banner.className = '';
+  if (!game) {
+    banner.textContent = '暂无对局。点右侧「单局」或「批量」，或启动时加 --autostart。';
+    $('s-turn').textContent = '—'; $('s-moves').textContent = '0'; $('s-status').textContent = '—';
+    $('s-id').textContent = '—';
     draw();
     return;
   }
-  const running = !!current.running;
-  playerCard($('p-black'), current.black, running && current.turn === 'black');
-  playerCard($('p-white'), current.white, running && current.turn === 'white');
+  const running = !!game.running && !replayGame;
+  playerCard($('p-black'), game.black, running && game.turn === 'black');
+  playerCard($('p-white'), game.white, running && game.turn === 'white');
 
-  const total = (current.moves || []).length;
-  $('s-turn').textContent = running ? (current.turn === 'black' ? '黑方思考中' : '白方思考中') : '已结束';
+  const total = (game.moves || []).length;
+  $('s-turn').textContent = running ? (game.turn === 'black' ? '黑方思考中' : '白方思考中')
+                                    : (replayGame ? '历史回放' : '已结束');
   $('s-moves').textContent = total;
-  $('s-status').textContent = running ? '进行中' : '已结束';
-  $('s-id').textContent = current.game_id || '—';
+  $('s-status').textContent = replayGame ? '历史回放' : (running ? '进行中' : '已结束');
+  $('s-id').textContent = game.game_id || '—';
 
-  const banner = $('banner');
-  if (running) {
-    banner.className = '';
-    banner.textContent = `进行中 · 第 ${total + 1} 手 · ${current.turn === 'black' ? '黑方' : '白方'}思考中`;
+  if (replayGame) {
+    const res = replayGame.result || {};
+    banner.innerHTML = '<span class="tag">历史回放</span>' + describeResult(replayGame, res);
+  } else if (running) {
+    banner.textContent = `进行中 · 第 ${total + 1} 手 · ${game.turn === 'black' ? '黑方' : '白方'}思考中`;
   } else {
-    const res = current.result || {};
-    const winnerName = res.winner === 'black' ? (current.black || {}).name
-                     : res.winner === 'white' ? (current.white || {}).name : null;
-    if (res.winner) {
-      banner.className = 'win';
-      banner.textContent = `🏆 ${res.winner === 'black' ? '黑方' : '白方'} ${winnerName} 胜 · ${shortReason(res.reason)}`;
-    } else if (res.reason === 'draw') {
-      banner.className = 'draw';
-      banner.textContent = '平局 · 棋盘已满';
-    } else {
-      banner.className = 'bad';
-      banner.textContent = `对局未产生胜者 · ${shortReason(res.reason)}`;
-    }
-    if (current.error) {
-      banner.textContent += ` ｜ ${current.error.color || '平台'}: ${current.error.message || ''}`;
-    }
+    banner.textContent = describeResult(game, game.result || {});
   }
 
-  // 时钟/回放
   $('slider').max = String(total);
   if (replayIndex !== null) {
     replayIndex = Math.min(replayIndex, total);
@@ -356,33 +384,106 @@ function render() {
   draw();
 }
 
+function describeResult(game, res) {
+  const winnerName = res.winner === 'black' ? (game.black || {}).name
+                   : res.winner === 'white' ? (game.white || {}).name : null;
+  let text;
+  let cls = '';
+  if (res.winner) {
+    cls = 'win';
+    text = `🏆 ${res.winner === 'black' ? '黑方' : '白方'} ${winnerName} 胜 · ${shortReason(res.reason)}`;
+  } else if (res.reason === 'draw') {
+    cls = 'draw';
+    text = '平局 · 棋盘已满';
+  } else if (res.reason === 'game_timeout') {
+    cls = 'draw';
+    text = `无胜负中止 · ${shortReason(res.reason)}（平台护栏，不归责任何一方）`;
+  } else {
+    cls = 'bad';
+    text = `对局未产生胜者 · ${shortReason(res.reason)}`;
+  }
+  if (game.error) text += ` ｜ ${game.error.color || '平台'}: ${game.error.message || ''}`;
+  $('banner').className = cls;
+  return text;
+}
+
 function renderHistory() {
   const body = $('rec-body');
   body.innerHTML = '';
-  let blackWins = 0, whiteWins = 0, draws = 0, bad = 0;
-  for (const rec of lastGames) {
+  for (const rec of recentGames) {
     const res = rec.result || {};
-    if (res.winner === 'black') blackWins++;
-    else if (res.winner === 'white') whiteWins++;
-    else if (res.reason === 'draw') draws++;
-    else bad++;
-
     const tr = document.createElement('tr');
-    if (rec.game_id === selectedId) tr.className = 'sel';
+    const shown = replayGame ? replayGame.game_id : (liveGame && liveGame.game_id);
+    if (rec.game_id === shown) tr.className = 'sel';
     const t = (rec.ts || '').replace('T', ' ').slice(5, 19);
     const pill = res.winner
       ? `<span class="pill ${res.winner}">${res.winner === 'black' ? '黑胜' : '白胜'}</span>`
       : res.reason === 'draw' ? '<span class="pill warn">平</span>'
       : `<span class="pill bad">${shortReason(res.reason)}</span>`;
     tr.innerHTML = `<td>${t}</td><td>${(rec.black || {}).name || '?'}</td>`
-      + `<td>${(rec.white || {}).name || '?'}</td><td>${pill}</td><td>${rec.move_count ?? 0}</td>`;
+      + `<td>${(rec.white || {}).name || '?'}</td><td>${pill}</td>`
+      + `<td class="num">${rec.move_count ?? 0}</td>`;
     tr.onclick = () => selectGame(rec.game_id);
     body.appendChild(tr);
   }
-  $('rec-count').textContent = lastGames.length;
-  $('t-total').textContent = lastGames.length;
-  $('t-wl').textContent = `${blackWins} / ${whiteWins} / ${draws}`;
-  $('t-bad').textContent = bad;
+  $('rec-count').textContent = recentGames.length;
+}
+
+function renderStats() {
+  if (!stats) return;
+  $('t-total').textContent = stats.total_games;
+  $('t-wl').textContent = `${stats.black_wins} / ${stats.white_wins} / ${stats.draws}`;
+  $('t-bad').textContent = stats.abnormal;
+  $('stats-scope').textContent = `全部 ${stats.total_games} 局`;
+  const box = $('t-engines');
+  box.innerHTML = '';
+  if (!stats.engines.length) return;
+  const table = document.createElement('table');
+  table.innerHTML = '<thead><tr><th>引擎</th><th class="num">局</th><th class="num">胜</th>'
+    + '<th class="num">负</th><th class="num">平</th><th class="num">超时</th><th class="num">非法</th>'
+    + '<th class="num">胜率</th></tr></thead>';
+  const tb = document.createElement('tbody');
+  for (const e of stats.engines) {
+    const rate = e.win_rate == null ? '-' : (e.win_rate * 100).toFixed(1) + '%';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${e.name}<br><span style="color:var(--dim);font-size:11px">`
+      + `${e.version}${e.checkpoint && e.checkpoint !== 'none' ? ' · ' + e.checkpoint : ''}</span></td>`
+      + `<td class="num">${e.games}</td><td class="num">${e.win}</td><td class="num">${e.loss}</td>`
+      + `<td class="num">${e.draw}</td><td class="num">${e.timeout}</td>`
+      + `<td class="num">${e.illegal_move}</td><td class="num">${rate}</td>`;
+    tb.appendChild(tr);
+  }
+  table.appendChild(tb);
+  box.appendChild(table);
+}
+
+function renderBatch(batch) {
+  if (!batch) { $('batch-panel').style.display = 'none'; return; }
+  $('batch-panel').style.display = 'block';
+  const played = batch.played || 0, requested = batch.requested || 0;
+  $('batch-bar').style.width = requested ? `${Math.min(100, played / requested * 100)}%` : '0';
+  $('batch-progress').textContent = `${played} / ${requested} 局 · ${batch.status}`;
+  const box = $('batch-table');
+  box.innerHTML = '';
+  if (!batch.totals) return;
+  const table = document.createElement('table');
+  const tb = document.createElement('tbody');
+  for (const [name, t] of Object.entries(batch.totals)) {
+    const rate = t.win_rate == null ? '-' : (t.win_rate * 100).toFixed(1) + '%';
+    const b = batch.sides[name].as_black, w = batch.sides[name].as_white;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${name}</td><td class="num">${t.win}-${t.loss}-${t.draw}</td>`
+      + `<td class="num">胜率 ${rate}</td>`;
+    const tr2 = document.createElement('tr');
+    tr2.innerHTML = `<td style="color:var(--dim);font-size:11px">执黑 ${b.win}-${b.loss}-${b.draw} `
+      + `｜ 执白 ${w.win}-${w.loss}-${w.draw}</td>`
+      + `<td class="num" style="color:var(--dim);font-size:11px">超时${t.timeout} 非法${t.illegal_move}</td><td></td>`;
+    tb.appendChild(tr); tb.appendChild(tr2);
+  }
+  table.appendChild(tb);
+  box.appendChild(table);
+  const running = batch.status === 'running';
+  $('btn-batch-cancel').disabled = !running;
 }
 
 /* ---------------- 数据 ---------------- */
@@ -394,46 +495,124 @@ async function api(path, opts) {
   return data;
 }
 
-async function refreshHistory() {
-  try { lastGames = await api('/api/games?limit=30'); renderHistory(); }
-  catch (e) { /* 列表失败不阻塞棋盘 */ }
+async function loadMeta() {
+  try {
+    const engines = await api('/api/engines');
+    for (const sel of [$('in-black'), $('in-white')]) {
+      sel.innerHTML = '';
+      for (const e of engines) {
+        const opt = document.createElement('option');
+        opt.value = e.key;
+        opt.textContent = `${e.name} ${e.version}${e.baseline ? '（基线，非RL）' : ''}`;
+        sel.appendChild(opt);
+      }
+    }
+    if (engines.length > 1) $('in-white').value = engines[1].key;
+  } catch (e) { /* 忽略 */ }
+  try {
+    const info = await api('/api/board');
+    setupGeometry(info.board_size);
+    $('rule-line').textContent = info.rule;
+  } catch (e) { setupGeometry(15); }
 }
 
-async function poll() {
+async function refreshHistory() {
+  try { recentGames = await api('/api/games?limit=30'); renderHistory(); } catch (e) {}
+}
+
+async function refreshStats() {
+  try { stats = await api('/api/stats'); renderStats(); } catch (e) {}
+}
+
+let pollTimer = null;
+async function pollLive() {
   try {
     const state = await api('/api/state');
     if (state) {
-      const changed = !current || current.game_id !== state.game_id
-        || (current.moves || []).length !== (state.moves || []).length
-        || current.running !== state.running;
-      current = state;
-      if (changed) {
-        if (!state.running) refreshHistory();
-        render();
-      } else if (state.running) {
-        render();  // 进行中：保持手数/状态读数刷新
-      }
+      const newGame = state.game_id !== lastLiveId;
+      lastLiveId = state.game_id;
+      liveGame = state;
+      if (newGame) { replayGame = null; replayIndex = null; refreshHistory(); }
+      if (!state.running && !replayGame) await refreshStats();
     }
   } catch (e) {
-    $('banner').textContent = `连接失败: ${e.message}`;
-    $('banner').className = 'bad';
+    if (!replayGame) {
+      $('banner').textContent = `连接失败: ${e.message}`;
+      $('banner').className = 'bad';
+    }
   }
+  if (!replayGame) render();
+  scheduleNext();
+}
+
+async function pollBatch() {
+  if (!activeBatch) return;
+  try {
+    const batch = await api(`/api/batches/${activeBatch}`);
+    renderBatch(batch);
+    if (batch.status !== 'running') {
+      activeBatch = null;
+      refreshHistory();
+      refreshStats();
+    }
+  } catch (e) { activeBatch = null; }
+}
+
+function scheduleNext() {
+  clearTimeout(pollTimer);
+  // 回放历史时降低实时轮询频率，避免无意义请求；但绝不停止，实时对局仍在推进
+  pollTimer = setTimeout(pollLive, replayGame ? POLL_HISTORY_MS : POLL_LIVE_MS);
 }
 
 async function selectGame(gameId) {
   try {
-    current = await api(`/api/games/${encodeURIComponent(gameId)}`);
-    selectedId = gameId;
+    replayGame = await api(`/api/games/${encodeURIComponent(gameId)}`);
     replayIndex = null;
     renderHistory();
     render();
-  } catch (e) { alert(e.message); }
+    scheduleNext();
+  } catch (e) { $('start-err').textContent = e.message; }
+}
+
+function exitReplay() {
+  replayGame = null;
+  replayIndex = null;
+  renderHistory();
+  render();
+  scheduleNext();
 }
 
 async function startMatch() {
   const btn = $('btn-start');
   btn.disabled = true;
   $('start-err').textContent = '';
+  const body = collectForm();
+  try {
+    liveGame = await api('/api/matches', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                          body: JSON.stringify(body)});
+    lastLiveId = liveGame.game_id;
+    exitReplay();
+  } catch (e) { $('start-err').textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+
+async function startBatch() {
+  const btn = $('btn-batch');
+  btn.disabled = true;
+  $('start-err').textContent = '';
+  const body = collectForm();
+  body.games = Math.max(1, Number($('in-games').value) || 10);
+  try {
+    const batch = await api('/api/batches', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                             body: JSON.stringify(body)});
+    activeBatch = batch.batch_id;
+    renderBatch(batch);
+    setInterval(pollBatch, POLL_BATCH_MS);
+  } catch (e) { $('start-err').textContent = e.message; }
+  finally { btn.disabled = false; }
+}
+
+function collectForm() {
   const seedRaw = $('in-seed').value.trim();
   const body = {
     black: $('in-black').value,
@@ -442,67 +621,44 @@ async function startMatch() {
     game_timeout_ms: Number($('in-game').value) || 120000,
   };
   if (seedRaw !== '') body.seed = Number(seedRaw);
-  try {
-    const snap = await api('/api/matches', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    current = snap;
-    selectedId = null;
-    replayIndex = null;
-    renderHistory();
-    render();
-  } catch (e) {
-    $('start-err').textContent = e.message;
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-async function loadEngines() {
-  try {
-    const engines = await api('/api/engines');
-    for (const sel of [$('in-black'), $('in-white')]) {
-      sel.innerHTML = '';
-      for (const e of engines) {
-        const opt = document.createElement('option');
-        opt.value = e.key;
-        opt.textContent = `${e.name} ${e.version}`;
-        sel.appendChild(opt);
-      }
-    }
-    if (engines.length > 1) $('in-white').value = engines[1].key;
-  } catch (e) { /* 忽略 */ }
+  return body;
 }
 
 /* ---------------- 交互 ---------------- */
 
 $('btn-start').onclick = startMatch;
+$('btn-batch').onclick = startBatch;
+$('btn-batch-cancel').onclick = async () => {
+  if (!activeBatch) return;
+  try { await api(`/api/batches/${activeBatch}`, {method: 'DELETE'}); } catch (e) {}
+};
 $('slider').oninput = (ev) => { replayIndex = Number(ev.target.value); render(); };
 $('btn-prev').onclick = () => {
-  const total = (current?.moves || []).length;
+  const game = replayGame || liveGame; if (!game) return;
+  const total = (game.moves || []).length;
   replayIndex = Math.max(0, (replayIndex === null ? total : replayIndex) - 1);
   render();
 };
 $('btn-next').onclick = () => {
-  const total = (current?.moves || []).length;
+  const game = replayGame || liveGame; if (!game) return;
+  const total = (game.moves || []).length;
   if (replayIndex === null) return;
   replayIndex = Math.min(total, replayIndex + 1);
-  if (replayIndex >= total) replayIndex = null;   // 到底即回到实时
+  if (replayIndex >= total) replayIndex = replayGame ? total : null;
   render();
 };
-$('btn-live').onclick = () => { replayIndex = null; render(); };
+$('btn-live').onclick = exitReplay;
 document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft') $('btn-prev').click();
   else if (e.key === 'ArrowRight') $('btn-next').click();
 });
 
-loadEngines();
+loadMeta();
 refreshHistory();
-poll();
-setInterval(poll, 350);
+refreshStats();
+pollLive();
 setInterval(refreshHistory, 5000);
+setInterval(refreshStats, 15000);
 </script>
 </body>
 </html>

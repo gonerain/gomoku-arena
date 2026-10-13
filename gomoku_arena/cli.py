@@ -1,59 +1,61 @@
 """命令行跑单局（不开浏览器时用）。
 
-    python -m platform.cli --black random --white greedy
-    python -m platform.cli --black greedy --white trained --moves
+    python -m gomoku_arena.cli --black random --white greedy
+    python -m gomoku_arena.cli --black greedy --white trained --moves
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from platform.match import Match, MatchConfig
-    from platform.rules import BOARD_SIZE, PROTOCOL, replay
-    from platform.server import ENGINES, Store, launch_spec
-else:
-    from .match import Match, MatchConfig
-    from .rules import BOARD_SIZE, PROTOCOL, replay
-    from .server import ENGINES, Store, launch_spec
+from .match import Match, MatchConfig
+from .rules import BOARD_SIZE, PROTOCOL, replay
+from .server import ENGINES, Store, launch_spec, with_checkpoint
 
 REASON_TEXT = {
     "five": "五连获胜",
     "draw": "棋盘已满，平局",
-    "timeout": "超时判负",
+    "timeout": "单步超时判负",
+    "game_timeout": "整局墙钟上限用完，无胜负中止（不归责任何一方）",
     "crash": "进程崩溃判负",
     "illegal_move": "非法落子判负",
     "bad_output": "输出非协议帧，判负",
     "protocol": "协议违规判负",
     "resign": "主动认输",
     "start_failed": "引擎启动失败",
-    "aborted": "对局中止",
+    "aborted": "对局中止（无法可靠归责）",
 }
 
 
-def build_spec(key: str) -> dict:
+def build_spec(key: str, checkpoint: str | None = None) -> dict:
     if key in ENGINES:
-        return launch_spec(ENGINES[key])
+        return with_checkpoint(launch_spec(ENGINES[key]), checkpoint)
     # 允许直接给可执行文件路径（可跟参数，空格分隔），方便临时接入外部引擎
+    from pathlib import Path
+
     parts = key.split()
     path = Path(parts[0])
     if path.exists():
         return launch_spec(
-            {"name": path.stem, "version": "v0", "cmd": [sys.executable, str(path), *parts[1:]]}
+            {
+                "name": path.stem,
+                "version": "v0",
+                "cmd": [sys.executable, str(path), *parts[1:]],
+                "meta": {"baseline": True, "desc": "外部脚本"},
+            }
         )
     raise SystemExit(f"未知引擎: {key!r}，可选 {sorted(ENGINES)} 或一个 .py 文件路径")
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="platform.cli", description="五子棋对抗：命令行跑单局")
+    parser = argparse.ArgumentParser(prog="gomoku_arena.cli", description="五子棋对抗：命令行跑单局")
     parser.add_argument("--black", default="random", help="黑方引擎（名称或 .py 路径）")
     parser.add_argument("--white", default="greedy", help="白方引擎（名称或 .py 路径）")
+    parser.add_argument("--black-checkpoint", default=None, help="黑方模型 checkpoint（仅 trained 引擎）")
+    parser.add_argument("--white-checkpoint", default=None, help="白方模型 checkpoint（仅 trained 引擎）")
     parser.add_argument("--move-timeout", type=int, default=1000, help="每步时限 ms")
-    parser.add_argument("--game-timeout", type=int, default=120_000, help="整局上限 ms")
-    parser.add_argument("--board-size", type=int, default=BOARD_SIZE)
+    parser.add_argument("--game-timeout", type=int, default=120_000, help="整局墙钟上限 ms")
     parser.add_argument("--seed", type=int, default=None, help="随机种子（默认按时间取）")
     parser.add_argument("--moves", action="store_true", help="打印逐手记录")
     parser.add_argument("--board", action="store_true", help="打印终局棋盘")
@@ -67,11 +69,15 @@ def main(argv=None) -> int:
 
     config = MatchConfig(
         seed=args.seed,
-        board_size=args.board_size,
+        board_size=BOARD_SIZE,
         move_timeout_ms=args.move_timeout,
         game_timeout_ms=args.game_timeout,
     )
-    match = Match(build_spec(args.black), build_spec(args.white), config)
+    match = Match(
+        build_spec(args.black, args.black_checkpoint),
+        build_spec(args.white, args.white_checkpoint),
+        config,
+    )
     record = match.play()
 
     if args.moves or args.board:
@@ -98,6 +104,8 @@ def main(argv=None) -> int:
     print(f"共 {len(record['moves'])} 手，耗时 {record['duration_ms']}ms")
 
     if args.save:
+        from pathlib import Path
+
         store = Store(Path("records/games.jsonl"))
         store.append(record)
         print(f"已写入 {store.path}（共 {len(store.records)} 局）")

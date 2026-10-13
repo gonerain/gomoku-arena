@@ -50,8 +50,34 @@ class EngineProc:
         self._reader: threading.Thread | None = None
         self._closed = False
         self._job = None
+        self._job_assigned = False
+        self._exit_code: int | None = None
 
     # ---------- 生命周期 ----------
+
+    @property
+    def exit_code(self) -> int | None:
+        """子进程退出码；仍在运行或尚未观测到退出时为 None。"""
+        if self._exit_code is None and self.proc is not None:
+            self._exit_code = self._reap()
+        return self._exit_code
+
+    def _reap(self) -> int | None:
+        """回收子进程并取回退出码。
+
+        收到 stdout EOF 的瞬间 Popen.returncode 往往还是 None（读端先看到管道关闭，
+        进程退出状态还没被回收）。不补一次 wait，判负记录里就只能写"退出码未知"，
+        丢掉"退出码 2 = 模型加载失败"这类关键信息。
+        """
+        proc = self.proc
+        if proc is None:
+            return None
+        try:
+            return proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            return proc.returncode
+        except Exception:
+            return proc.returncode
 
     def start(self) -> None:
         env = dict(os.environ)
@@ -59,16 +85,20 @@ class EngineProc:
         env.setdefault("PYTHONUNBUFFERED", "1")
         env.update(self.env_extra)
 
-        # 先建 Job Object（kill-on-close），并让子进程挂起启动：
-        # 这样"加入 Job"发生在子进程执行第一条指令之前，它之后派生的任何后代
-        # 都必然落在同一个 Job 里，关掉 Job 句柄即可被操作系统整棵端掉。
+        # Windows：先建 kill-on-close 的 Job，再以挂起态启动子进程，入 Job 后才恢复运行。
+        # 这样"加入 Job"发生在子进程执行第一条指令之前，它之后派生的任何后代都必然
+        # 落在同一个 Job 里。Job 不可用时退回普通启动 + best-effort 清理。
         job = _create_kill_on_close_job()
-        creationflags = 0
-        if job is not None and os.name == "nt":
-            # 挂起启动 + 先入 Job 再恢复，杜绝"子进程抢在入 Job 前又派生后代"的竞态
-            creationflags = CREATE_SUSPENDED | CREATE_NO_WINDOW
-        elif os.name == "nt":
-            creationflags = CREATE_NO_WINDOW
+        is_windows = os.name == "nt"
+        creationflags = CREATE_NO_WINDOW if is_windows else 0
+        suspended = job is not None and is_windows
+        if suspended:
+            creationflags |= CREATE_SUSPENDED
+
+        kwargs = {}
+        if not is_windows:
+            # POSIX：让子进程自成会话/进程组，killpg 才不会波及裁判自身
+            kwargs["start_new_session"] = True
 
         try:
             self.proc = subprocess.Popen(
@@ -83,22 +113,42 @@ class EngineProc:
                 bufsize=1,
                 env=env,
                 creationflags=creationflags,
+                **kwargs,
             )
         except OSError as exc:
+            _close_handle_once(job)
             raise EngineError("START_FAILED", f"无法启动引擎 {self.label}: {exc}") from exc
 
-        if job is not None:
-            self._job = job
-            if not _assign_to_job(job, self.proc):
-                sys.stderr.write(
-                    f"[engine_host] 警告: {self.label} 无法加入 Job Object，"
-                    f"进程树清理将退化为 best-effort\n"
-                )
-            _resume_process(self.proc)
+        if suspended:
+            self._finish_suspended_start(job)
+        else:
+            _close_handle_once(job)  # 没用上就立刻还回去，避免句柄泄漏
 
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
+
+    def _finish_suspended_start(self, job) -> None:
+        """把挂起的子进程放进 Job 并恢复运行；任一步失败都不能留下永久挂起的进程。"""
+        assert self.proc is not None
+        if _assign_to_job(job, self.proc):
+            self._job = job
+            self._job_assigned = True
+        else:
+            # 入 Job 失败：Job 句柄对清理已无意义，立刻释放，退回 best-effort 路径
+            _close_handle_once(job)
+            sys.stderr.write(
+                f"[engine_host] 警告: {self.label} 无法加入 Job Object，"
+                f"进程树清理退化为 best-effort\n"
+            )
+
+        if not _resume_process(self.proc):
+            # 恢复失败会让子进程永远挂起，必须就地终结并向上报错
+            _safe_kill(self.proc)
+            _kill_tree(self.proc, job=self._job if self._job_assigned else None)
+            raise EngineError(
+                "START_FAILED", f"{self.label} 无法从挂起态恢复，已终止该进程"
+            )
 
     def _read_stdout(self) -> None:
         assert self.proc and self.proc.stdout
@@ -113,20 +163,21 @@ class EngineProc:
         sys.stderr.flush()
 
     def close(self) -> None:
-        """关闭 stdin 并清理整棵进程树。无论如何都必须走到清理，不能被异常打断。"""
+        """关闭 stdin 并清理整棵进程树。清理必须无条件执行，不能被异常打断。"""
         if self._closed:
             return
         self._closed = True
         proc = self.proc
         if proc is None:
+            _close_handle_once(self._job)
+            self._job = None
             return
         try:
             if proc.stdin and not proc.stdin.closed:
                 proc.stdin.close()
         except OSError:
             pass
-        _kill_tree(proc, job=self._job)
-        _close_handle(self._job)
+        _kill_tree(proc, job=self._job if self._job_assigned else None)
         self._job = None
 
     # ---------- 收发 ----------
@@ -146,21 +197,25 @@ class EngineProc:
     def recv(self, deadline_ms: int) -> dict:
         """在 deadline_ms 内读取一个合法 JSON 帧。超时/崩溃/脏输出都抛 EngineError。
 
-        判定规则：stdout 出现 EOF = 进程树已终止（含已崩溃）= CRASH；
-        未在时限内读到帧 = TIMEOUT，附带一次进程状态探测，便于事后定位原因。
+        判定规则：stdout 出现 EOF = 进程树已终止（含崩溃、含管道被后代关闭）= CRASH；
+        未在时限内读到帧 = TIMEOUT，附带一次进程状态探测以便事后定位。
         """
         deadline = time.monotonic() + deadline_ms / 1000.0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise EngineError("TIMEOUT", f"{self.label} 超过 {deadline_ms}ms 未落子")
+                raise EngineError(
+                    "TIMEOUT", f"{self.label} 超过 {deadline_ms}ms 未落子{self._exit_note()}"
+                ) from None
             try:
                 line = self._lines.get(timeout=remaining)
             except queue.Empty:
-                raise EngineError("TIMEOUT", f"{self.label} 超过 {deadline_ms}ms 未落子{self._exit_note()}") from None
+                raise EngineError(
+                    "TIMEOUT", f"{self.label} 超过 {deadline_ms}ms 未落子{self._exit_note()}"
+                ) from None
             if line is None:
-                code = self.proc.returncode if self.proc else None
-                raise EngineError("CRASH", f"{self.label} 进程已退出 (code={code})")
+                self._exit_code = self._reap()
+                raise EngineError("CRASH", f"{self.label} {self._exit_message(self._exit_code)}")
             line = line.strip()
             if not line:
                 continue  # 空行忽略
@@ -174,18 +229,23 @@ class EngineProc:
                 raise EngineError("BAD_OUTPUT", f"{self.label} 缺少 type 字段: {line[:120]!r}")
             return frame
 
+    def _exit_message(self, code: int | None) -> str:
+        """把退出码翻译成明确的判负原因，而不是笼统的"进程已退出"。"""
+        if code is None:
+            return "进程已退出（stdout 管道已关闭，可能已被系统回收）"
+        if code == 0:
+            return "进程已退出（退出码 0：正常退出但没有给出着法）"
+        return f"进程异常退出（退出码 {code}）"
+
     def _exit_note(self) -> str:
         """超时时探测一次子进程状态，只为让错误信息更有诊断价值。"""
-        proc = self.proc
-        if proc is None:
-            return ""
-        try:
-            code = proc.poll()
-        except Exception:
-            return ""
+        code = self._exit_code if self._exit_code is not None else (
+            self.proc.returncode if self.proc else None
+        )
         if code is None:
             return ""
-        return f"（子进程已退出 code={code}，可能是它派生的后代仍持有 stdout 管道）"
+        return f"（子进程已退出{'，退出码 ' + str(code) if code is not None else ''}，" \
+               f"可能是它派生的后代仍持有 stdout 管道）"
 
 
 def _kill_tree(proc: subprocess.Popen, job=None, grace: float = 0.3) -> None:
@@ -194,11 +254,11 @@ def _kill_tree(proc: subprocess.Popen, job=None, grace: float = 0.3) -> None:
     引擎完全可能派生子进程（搜索 worker、DataLoader 等），只杀父进程会留下孤儿
     进程吃 CPU。清理力度按可靠性从高到低排：
 
-      1. Job Object（Windows，kill-on-close）—— 操作系统级保证整棵树的成员一起死，
-         不管后代是否已被 reparent。这是唯一能可靠处理"父进程先退出、孙进程被
-        重新挂到别的父进程下"这种情形的手段。
+      1. Job Object（Windows，kill-on-close）—— 内核级保证整棵树一起终结，
+         不管后代是否已被 reparent。这是唯一能可靠处理"父进程先退出、孙进程
+         被重新挂到别的父进程下"这种情形的手段。仅在成功入 Job 时才传 job。
       2. psutil 递归枚举 —— 父进程仍存活时有效。
-      3. taskkill /F /T（Windows）、killpg（POSIX）—— 兜底。
+      3. taskkill /F /T（Windows）、killpg（POSIX，子进程自成进程组）—— 兜底。
     """
     # 1) 先给 grace 秒体面退出（stdin 已关闭，正常引擎会自己收尾）
     try:
@@ -206,14 +266,9 @@ def _kill_tree(proc: subprocess.Popen, job=None, grace: float = 0.3) -> None:
     except subprocess.TimeoutExpired:
         pass
 
-    # 2) Job Object：关句柄即整棵树终结
+    # 2) Job Object：关句柄即整棵树终结（幂等，重复调用安全）
     if job is not None:
-        _close_handle(job)
-        try:
-            proc.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            _safe_kill(proc)
-        return
+        _close_handle_once(job)
 
     # 3) psutil 递归（父进程还活着才有意义）
     if psutil is not None and proc.poll() is None:
@@ -241,10 +296,7 @@ def _kill_tree(proc: subprocess.Popen, job=None, grace: float = 0.3) -> None:
                 check=False,
             )
     else:  # pragma: no cover - 仅在 POSIX 上执行
-        try:
-            os.killpg(os.getpgid(proc.pid), 9)
-        except OSError:
-            _safe_kill(proc)
+        _kill_process_group(proc)
 
     try:
         proc.wait(timeout=1.0)
@@ -252,9 +304,65 @@ def _kill_tree(proc: subprocess.Popen, job=None, grace: float = 0.3) -> None:
         _safe_kill(proc)
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """POSIX 兜底：只杀子进程自己的进程组。
+
+    必须先确认子进程确实是组长（pgid == pid）。否则 killpg 会打到裁判所在的
+    进程组，把裁判自己杀掉 —— 这比漏杀更严重。
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        _safe_kill(proc)
+        return
+    if pgid != proc.pid:
+        sys.stderr.write(
+            f"[engine_host] 警告: pid={proc.pid} 不是进程组组长 (pgid={pgid})，"
+            f"跳过 killpg 以免误杀裁判，改为只杀该进程\n"
+        )
+        _safe_kill(proc)
+        return
+    try:
+        os.killpg(pgid, 9)
+    except OSError:
+        _safe_kill(proc)
+
+
 def _safe_kill(target) -> None:
     try:
         target.kill()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Windows 句柄管理：每个句柄只关闭一次
+# ---------------------------------------------------------------------------
+
+_closed_handles: set[int] = set()
+_handle_lock = threading.Lock()
+
+
+def _close_handle_once(handle) -> None:
+    """关闭句柄，且保证同一个句柄不会被关第二次。
+
+    重复 CloseHandle 会破坏无关的内核对象（句柄值可能已被复用），
+    因此这里按句柄值记账，而不是靠调用方小心。
+    """
+    if not handle:
+        return
+    key = int(handle)
+    with _handle_lock:
+        if key in _closed_handles:
+            return
+        _closed_handles.add(key)
+    if not _JOB_AVAILABLE or os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle(ctypes.c_void_p(key))
     except Exception:
         pass
 
@@ -274,7 +382,6 @@ _PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 _THREAD_SUSPEND_RESUME = 0x0002
 _TH32CS_SNAPTHREAD = 0x00000004
-_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 _JOB_AVAILABLE = hasattr(ctypes, "WinDLL")
 
 
@@ -346,7 +453,7 @@ def _create_kill_on_close_job():
             ctypes.sizeof(info),
         )
         if not ok:
-            kernel32.CloseHandle(ctypes.c_void_p(job))
+            _close_handle_once(job)
             return None
         return job
     except Exception:
@@ -366,21 +473,28 @@ def _assign_to_job(job, proc: subprocess.Popen) -> bool:
         if not handle:
             return False
         try:
-            return bool(kernel32.AssignProcessToJobObject(ctypes.c_void_p(job), ctypes.c_void_p(handle)))
+            for attempt in (1, 2):  # 极小概率的瞬时失败，重试一次即可
+                if kernel32.AssignProcessToJobObject(
+                    ctypes.c_void_p(job), ctypes.c_void_p(handle)
+                ):
+                    return True
+                if attempt == 1:
+                    time.sleep(0.05)
+            return False
         finally:
             kernel32.CloseHandle(ctypes.c_void_p(handle))
     except Exception:
         return False
 
 
-def _resume_process(proc: subprocess.Popen) -> None:
-    """恢复被 CREATE_SUSPENDED 挂起的进程。
+def _resume_process(proc: subprocess.Popen) -> bool:
+    """恢复被 CREATE_SUSPENDED 挂起的进程，返回是否成功。
 
     挂起进程此刻只有一个线程，用 Toolhelp32 枚举它的线程 id，再 OpenThread 恢复。
     （subprocess 不暴露线程句柄，所以只能这么找。）
     """
     if not _JOB_AVAILABLE or os.name != "nt":
-        return
+        return False
     try:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
@@ -395,9 +509,10 @@ def _resume_process(proc: subprocess.Popen) -> None:
         kernel32.ResumeThread.argtypes = [ctypes.c_void_p]
 
         snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
-        if snapshot == _INVALID_HANDLE_VALUE or not snapshot:
+        if not snapshot or snapshot == ctypes.c_void_p(-1).value:
             sys.stderr.write("[engine_host] 警告: 无法创建线程快照，子进程可能仍处于挂起\n")
-            return
+            return False
+        resumed = False
         try:
             entry = _ThreadEntry32()
             entry.dwSize = ctypes.sizeof(_ThreadEntry32)
@@ -406,24 +521,18 @@ def _resume_process(proc: subprocess.Popen) -> None:
                 if entry.th32OwnerProcessID == proc.pid:
                     thread = kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
                     if thread:
-                        kernel32.ResumeThread(ctypes.c_void_p(thread))
-                        kernel32.CloseHandle(ctypes.c_void_p(thread))
-                    return
+                        try:
+                            # ResumeThread 返回 0xFFFFFFFF 表示失败
+                            resumed = kernel32.ResumeThread(ctypes.c_void_p(thread)) != 0xFFFFFFFF
+                        finally:
+                            kernel32.CloseHandle(ctypes.c_void_p(thread))
+                    break
                 ok = kernel32.Thread32Next(ctypes.c_void_p(snapshot), ctypes.byref(entry))
-            sys.stderr.write(f"[engine_host] 警告: 未找到 pid={proc.pid} 的线程，无法恢复运行\n")
         finally:
             kernel32.CloseHandle(ctypes.c_void_p(snapshot))
+        if not resumed:
+            sys.stderr.write(f"[engine_host] 警告: 未能恢复 pid={proc.pid} 的线程\n")
+        return resumed
     except Exception as exc:
         sys.stderr.write(f"[engine_host] 警告: 恢复挂起进程失败: {exc}\n")
-
-
-def _close_handle(handle) -> None:
-    if not handle or not _JOB_AVAILABLE or os.name != "nt":
-        return
-    try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CloseHandle.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle(ctypes.c_void_p(handle))
-    except Exception:
-        pass
+        return False

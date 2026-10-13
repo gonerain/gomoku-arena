@@ -12,6 +12,10 @@ venv/
 records/*.jsonl
 *.log
 
+# 训练侧模型文件（体积大，不进版本库）
+checkpoints/*
+!checkpoints/.gitkeep
+
 # 编辑器 / 系统
 .vscode/
 .idea/

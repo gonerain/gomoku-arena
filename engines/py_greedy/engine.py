@@ -3,6 +3,8 @@
 它存在的意义是给 RL 训练提供一个有意义的基线对手 —— 一个随机模型打赢它
 说明训练确实在起作用，打不赢说明还没学到东西。
 
+它不是 RL 模型（meta.baseline=true），平台与界面都会把它标注为基线。
+
     python engines/py_greedy/engine.py
 """
 
