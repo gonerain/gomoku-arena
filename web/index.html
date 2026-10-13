@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>五子棋 RL 竞技场</title>
+<style>
+  :root {
+    --bg: #12141a; --panel: #1b1e27; --panel2: #232734; --line: #2f3443;
+    --text: #e6e8ee; --dim: #8b93a7; --accent: #4c8dff; --ok: #34d399;
+    --warn: #fbbf24; --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", sans-serif;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  header .rule { color: var(--dim); font-size: 12.5px; }
+  main { display: flex; gap: 20px; padding: 20px; align-items: flex-start; flex-wrap: wrap; }
+  #board-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  canvas { display: block; border-radius: 6px; }
+  #banner {
+    margin-bottom: 10px; padding: 9px 12px; border-radius: 6px; font-size: 13.5px;
+    background: var(--panel2); color: var(--dim); min-height: 38px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #banner.win { color: var(--ok); }
+  #banner.draw { color: var(--warn); }
+  #banner.bad { color: var(--bad); }
+  aside { flex: 1 1 340px; min-width: 320px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .card h2 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--dim); letter-spacing: .04em; text-transform: uppercase; }
+  .player { display: flex; align-items: center; gap: 10px; padding: 7px 0; }
+  .player + .player { border-top: 1px dashed var(--line); }
+  .dot { width: 15px; height: 15px; border-radius: 50%; flex: 0 0 auto; }
+  .dot.black { background: radial-gradient(circle at 34% 30%, #6b7280, #0b0d12 70%); }
+  .dot.white { background: radial-gradient(circle at 34% 30%, #ffffff, #b7bcc9 75%); }
+  .player .name { font-weight: 600; }
+  .player .ver { color: var(--dim); font-size: 12px; }
+  .player .meta { color: var(--dim); font-size: 11.5px; margin-left: auto; text-align: right; max-width: 45%; }
+  .player.turn { background: rgba(76,141,255,.09); border-radius: 6px; padding-left: 6px; padding-right: 6px; margin: 0 -6px; }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 9px; }
+  .row label { flex: 0 0 62px; color: var(--dim); font-size: 12.5px; }
+  select, input, button {
+    font: inherit; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+  }
+  select, input { flex: 1; min-width: 0; }
+  button { cursor: pointer; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: .5; cursor: default; filter: none; }
+  button.ghost { background: var(--panel2); border-color: var(--line); color: var(--text); font-weight: 500; }
+  .stat { display: flex; justify-content: space-between; font-size: 12.5px; padding: 3px 0; color: var(--dim); }
+  .stat b { color: var(--text); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--dim); font-weight: 500; font-size: 11.5px; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--panel2); }
+  tbody tr.sel { background: rgba(76,141,255,.14); }
+  .pill { padding: 1px 7px; border-radius: 999px; font-size: 11px; background: var(--panel2); color: var(--dim); }
+  .pill.black { color: #cbd5e1; } .pill.white { color: #fff; background: #3a4152; }
+  .pill.bad { color: var(--bad); } .pill.warn { color: var(--warn); }
+  .scroll { max-height: 260px; overflow-y: auto; }
+  .playbar { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .playbar input[type=range] { flex: 1; padding: 0; }
+  footer { color: var(--dim); font-size: 12px; padding: 0 20px 24px; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>五子棋 RL 竞技场</h1>
+  <span class="rule">15×15 · 黑先 · ⑤连及以上获胜 · 双方无禁手 · 无开局规则</span>
+</header>
+
+<main>
+  <div id="board-card">
+    <div id="banner">正在连接…</div>
+    <canvas id="board" width="600" height="600"></canvas>
+  </div>
+
+  <aside>
+    <div class="card">
+      <h2>对局</h2>
+      <div id="players">
+        <div class="player" id="p-black"><span class="dot black"></span>
+          <span class="name">—</span><span class="ver"></span><span class="meta"></span></div>
+        <div class="player" id="p-white"><span class="dot white"></span>
+          <span class="name">—</span><span class="ver"></span><span class="meta"></span></div>
+      </div>
+      <div style="margin-top:10px">
+        <div class="stat"><span>当前手</span><b id="s-turn">—</b></div>
+        <div class="stat"><span>已下步数</span><b id="s-moves">0</b></div>
+        <div class="stat"><span>状态</span><b id="s-status">—</b></div>
+        <div class="stat"><span>对局 ID</span><b id="s-id" style="font-size:11.5px">—</b></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>开新局</h2>
+      <div class="row"><label>黑方</label><select id="in-black"></select></div>
+      <div class="row"><label>白方</label><select id="in-white"></select></div>
+      <div class="row"><label>每步 ms</label><input id="in-move" type="number" value="1000" min="50" step="50"></div>
+      <div class="row"><label>整局 ms</label><input id="in-game" type="number" value="120000" min="1000" step="1000"></div>
+      <div class="row"><label>随机种子</label><input id="in-seed" type="number" placeholder="留空则随机"></div>
+      <button id="btn-start" style="width:100%">开始对局</button>
+      <div id="start-err" style="color:var(--bad); font-size:12px; margin-top:8px"></div>
+    </div>
+
+    <div class="card">
+      <h2>比赛记录 <span id="rec-count" class="pill">0</span></h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>时间</th><th>黑</th><th>白</th><th>结果</th><th>步</th></tr></thead>
+          <tbody id="rec-body"></tbody>
+        </table>
+      </div>
+      <div class="playbar">
+        <button class="ghost" id="btn-prev">◀</button>
+        <input id="slider" type="range" min="0" max="0" value="0">
+        <button class="ghost" id="btn-next">▶</button>
+        <button class="ghost" id="btn-live">回到最新</button>
+      </div>
+      <div class="stat"><span>回放位置</span><b id="play-pos">实时</b></div>
+    </div>
+
+    <div class="card">
+      <h2>总战绩</h2>
+      <div class="stat"><span>总局数</span><b id="t-total">0</b></div>
+      <div class="stat"><span>黑胜 / 白胜 / 平</span><b id="t-wl">0 / 0 / 0</b></div>
+      <div class="stat"><span>异常结束</span><b id="t-bad">0</b></div>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  引擎协议：stdin 收 JSON、stdout 发 JSON、日志走 stderr —— 见 <code>platform/match.py</code> 的 PROTOCOL。
+  棋谱：<code>records/games.jsonl</code>，每局一行。
+</footer>
+
+<script>
+const SIZE = 15, CELL = 40, PAD = 20, R = 17;
+const canvas = document.getElementById('board');
+const g = canvas.getContext('2d');
+const STAR = [[3,3],[11,3],[3,11],[11,11],[7,7]];
+const DIRS = [[1,0],[0,1],[1,1],[1,-1]];
+
+let current = null;      // 当前展示的对局状态
+let replayIndex = null;  // null = 实时跟随；数字 = 回放停在第 N 手
+let lastGames = [];      // 历史列表
+let selectedId = null;
+
+const $ = (id) => document.getElementById(id);
+
+/* ---------------- 绘制 ---------------- */
+
+function px(x) { return PAD + x * CELL; }
+function py(y) { return PAD + (SIZE - 1 - y) * CELL; }   // y 向上增长
+
+function buildBoard(moves) {
+  const grid = Array.from({length: SIZE}, () => new Array(SIZE).fill(0));
+  const order = Array.from({length: SIZE}, () => new Array(SIZE).fill(0));
+  moves.forEach((m, i) => { grid[m.y][m.x] = m.color === 'black' ? 1 : 2; order[m.y][m.x] = i + 1; });
+  return {grid, order};
+}
+
+function findWinLine(moves) {
+  const {grid} = buildBoard(moves);
+  for (let i = moves.length - 1; i >= 0; i--) {
+    const m = moves[i];
+    const code = m.color === 'black' ? 1 : 2;
+    for (const [dx, dy] of DIRS) {
+      const line = [[m.x, m.y]];
+      for (const s of [1, -1]) {
+        let cx = m.x + dx * s, cy = m.y + dy * s;
+        while (cx >= 0 && cx < SIZE && cy >= 0 && cy < SIZE && grid[cy][cx] === code) {
+          line.push([cx, cy]); cx += dx * s; cy += dy * s;
+        }
+      }
+      if (line.length >= 5) return line;
+    }
+  }
+  return null;
+}
+
+function drawStone(cx, cy, code, label, opts = {}) {
+  g.save();
+  g.beginPath();
+  g.arc(cx, cy, R, 0, Math.PI * 2);
+  const grad = g.createRadialGradient(cx - R * 0.35, cy - R * 0.35, R * 0.15, cx, cy, R);
+  if (code === 1) { grad.addColorStop(0, '#7b8494'); grad.addColorStop(1, '#0b0d12'); }
+  else { grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#b9bec9'); }
+  g.fillStyle = grad;
+  g.shadowColor = 'rgba(0,0,0,.45)'; g.shadowBlur = 5; g.shadowOffsetY = 2;
+  g.fill();
+  g.restore();
+
+  if (opts.last) {
+    g.beginPath(); g.arc(cx, cy, R + 3, 0, Math.PI * 2);
+    g.strokeStyle = '#4c8dff'; g.lineWidth = 3; g.stroke();
+  }
+  if (label) {
+    g.fillStyle = code === 1 ? 'rgba(255,255,255,.82)' : 'rgba(20,24,34,.75)';
+    g.font = '600 13px "Segoe UI", sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(label, cx, cy + 0.5);
+  }
+}
+
+function draw() {
+  // 棋盘底色
+  const wood = g.createLinearGradient(0, 0, canvas.width, canvas.height);
+  wood.addColorStop(0, '#dcb277'); wood.addColorStop(1, '#c99a5c');
+  g.fillStyle = wood; g.fillRect(0, 0, canvas.width, canvas.height);
+
+  // 网格
+  g.strokeStyle = 'rgba(60,38,12,.65)'; g.lineWidth = 1;
+  for (let i = 0; i < SIZE; i++) {
+    g.beginPath(); g.moveTo(px(0), py(i)); g.lineTo(px(SIZE - 1), py(i)); g.stroke();
+    g.beginPath(); g.moveTo(px(i), py(0)); g.lineTo(px(i), py(SIZE - 1)); g.stroke();
+  }
+  g.strokeStyle = 'rgba(60,38,12,.95)'; g.lineWidth = 2;
+  g.strokeRect(px(0), py(SIZE - 1), CELL * (SIZE - 1), CELL * (SIZE - 1));
+
+  // 星位
+  g.fillStyle = 'rgba(60,38,12,.9)';
+  for (const [sx, sy] of STAR) {
+    g.beginPath(); g.arc(px(sx), py(sy), 3.2, 0, Math.PI * 2); g.fill();
+  }
+
+  // 坐标
+  g.fillStyle = 'rgba(60,38,12,.85)';
+  g.font = '11px "Segoe UI", sans-serif';
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let i = 0; i < SIZE; i++) {
+    g.fillText(String.fromCharCode(65 + i), px(i), py(SIZE - 1) + PAD * 0.75);
+    g.fillText(String(i + 1), px(0) - PAD * 0.75, py(i));
+  }
+
+  if (!current) return;
+
+  const total = current.moves ? current.moves.length : 0;
+  const upto = replayIndex === null ? total : Math.min(replayIndex, total);
+  const moves = (current.moves || []).slice(0, upto);
+  const {grid, order} = buildBoard(moves);
+
+  // 最后 1 手用高亮环标出
+  const last = moves.length ? moves[moves.length - 1] : null;
+
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      if (!grid[y][x]) continue;
+      const isLast = last && last.x === x && last.y === y && replayIndex === null;
+      drawStone(px(x), py(y), grid[y][x], String(order[y][x]), {last: isLast});
+    }
+  }
+
+  // 终局五连高亮（仅当回放到底）
+  if (replayIndex === null && current.result && current.result.winner) {
+    const line = findWinLine(current.moves || []);
+    if (line) {
+      g.strokeStyle = '#34d399'; g.lineWidth = 4; g.lineCap = 'round';
+      for (const [lx, ly] of line) {
+        g.beginPath(); g.arc(px(lx), py(ly), R + 4, 0, Math.PI * 2); g.stroke();
+      }
+    }
+  }
+}
+
+/* ---------------- 状态面板 ---------------- */
+
+const REASON_TEXT = {
+  five: '五连获胜',
+  draw: '棋盘已满，平局',
+  timeout: '超时判负',
+  crash: '进程崩溃判负',
+  illegal_move: '非法落子判负',
+  bad_output: '输出不是合法协议帧，判负',
+  protocol: '协议违规判负',
+  resign: '主动认输',
+  start_failed: '引擎启动失败',
+  aborted: '对局中止',
+  platform_error: '平台内部错误',
+};
+
+function playerCard(el, p, isTurn) {
+  if (!p) return;
+  el.querySelector('.name').textContent = p.name || '—';
+  el.querySelector('.ver').textContent = p.version || '';
+  const meta = p.meta && Object.keys(p.meta).length
+    ? Object.entries(p.meta).map(([k, v]) => `${k}=${v}`).join(' ')
+    : '';
+  el.querySelector('.meta').textContent = meta;
+  el.classList.toggle('turn', !!isTurn);
+}
+
+function shortReason(r) { return REASON_TEXT[r] || r || '—'; }
+
+function render() {
+  if (!current) {
+    $('banner').textContent = '暂无对局。点右侧「开始对局」，或启动时加 --autostart。';
+    $('banner').className = '';
+    draw();
+    return;
+  }
+  const running = !!current.running;
+  playerCard($('p-black'), current.black, running && current.turn === 'black');
+  playerCard($('p-white'), current.white, running && current.turn === 'white');
+
+  const total = (current.moves || []).length;
+  $('s-turn').textContent = running ? (current.turn === 'black' ? '黑方思考中' : '白方思考中') : '已结束';
+  $('s-moves').textContent = total;
+  $('s-status').textContent = running ? '进行中' : '已结束';
+  $('s-id').textContent = current.game_id || '—';
+
+  const banner = $('banner');
+  if (running) {
+    banner.className = '';
+    banner.textContent = `进行中 · 第 ${total + 1} 手 · ${current.turn === 'black' ? '黑方' : '白方'}思考中`;
+  } else {
+    const res = current.result || {};
+    const winnerName = res.winner === 'black' ? (current.black || {}).name
+                     : res.winner === 'white' ? (current.white || {}).name : null;
+    if (res.winner) {
+      banner.className = 'win';
+      banner.textContent = `🏆 ${res.winner === 'black' ? '黑方' : '白方'} ${winnerName} 胜 · ${shortReason(res.reason)}`;
+    } else if (res.reason === 'draw') {
+      banner.className = 'draw';
+      banner.textContent = '平局 · 棋盘已满';
+    } else {
+      banner.className = 'bad';
+      banner.textContent = `对局未产生胜者 · ${shortReason(res.reason)}`;
+    }
+    if (current.error) {
+      banner.textContent += ` ｜ ${current.error.color || '平台'}: ${current.error.message || ''}`;
+    }
+  }
+
+  // 时钟/回放
+  $('slider').max = String(total);
+  if (replayIndex !== null) {
+    replayIndex = Math.min(replayIndex, total);
+    $('slider').value = String(replayIndex);
+    $('play-pos').textContent = `第 ${replayIndex} / ${total} 手`;
+  } else {
+    $('slider').value = String(total);
+    $('play-pos').textContent = '实时';
+  }
+  draw();
+}
+
+function renderHistory() {
+  const body = $('rec-body');
+  body.innerHTML = '';
+  let blackWins = 0, whiteWins = 0, draws = 0, bad = 0;
+  for (const rec of lastGames) {
+    const res = rec.result || {};
+    if (res.winner === 'black') blackWins++;
+    else if (res.winner === 'white') whiteWins++;
+    else if (res.reason === 'draw') draws++;
+    else bad++;
+
+    const tr = document.createElement('tr');
+    if (rec.game_id === selectedId) tr.className = 'sel';
+    const t = (rec.ts || '').replace('T', ' ').slice(5, 19);
+    const pill = res.winner
+      ? `<span class="pill ${res.winner}">${res.winner === 'black' ? '黑胜' : '白胜'}</span>`
+      : res.reason === 'draw' ? '<span class="pill warn">平</span>'
+      : `<span class="pill bad">${shortReason(res.reason)}</span>`;
+    tr.innerHTML = `<td>${t}</td><td>${(rec.black || {}).name || '?'}</td>`
+      + `<td>${(rec.white || {}).name || '?'}</td><td>${pill}</td><td>${rec.move_count ?? 0}</td>`;
+    tr.onclick = () => selectGame(rec.game_id);
+    body.appendChild(tr);
+  }
+  $('rec-count').textContent = lastGames.length;
+  $('t-total').textContent = lastGames.length;
+  $('t-wl').textContent = `${blackWins} / ${whiteWins} / ${draws}`;
+  $('t-bad').textContent = bad;
+}
+
+/* ---------------- 数据 ---------------- */
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+  return data;
+}
+
+async function refreshHistory() {
+  try { lastGames = await api('/api/games?limit=30'); renderHistory(); }
+  catch (e) { /* 列表失败不阻塞棋盘 */ }
+}
+
+async function poll() {
+  try {
+    const state = await api('/api/state');
+    if (state) {
+      const changed = !current || current.game_id !== state.game_id
+        || (current.moves || []).length !== (state.moves || []).length
+        || current.running !== state.running;
+      current = state;
+      if (changed) {
+        if (!state.running) refreshHistory();
+        render();
+      } else if (state.running) {
+        render();  // 进行中：保持手数/状态读数刷新
+      }
+    }
+  } catch (e) {
+    $('banner').textContent = `连接失败: ${e.message}`;
+    $('banner').className = 'bad';
+  }
+}
+
+async function selectGame(gameId) {
+  try {
+    current = await api(`/api/games/${encodeURIComponent(gameId)}`);
+    selectedId = gameId;
+    replayIndex = null;
+    renderHistory();
+    render();
+  } catch (e) { alert(e.message); }
+}
+
+async function startMatch() {
+  const btn = $('btn-start');
+  btn.disabled = true;
+  $('start-err').textContent = '';
+  const seedRaw = $('in-seed').value.trim();
+  const body = {
+    black: $('in-black').value,
+    white: $('in-white').value,
+    move_timeout_ms: Number($('in-move').value) || 1000,
+    game_timeout_ms: Number($('in-game').value) || 120000,
+  };
+  if (seedRaw !== '') body.seed = Number(seedRaw);
+  try {
+    const snap = await api('/api/matches', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    current = snap;
+    selectedId = null;
+    replayIndex = null;
+    renderHistory();
+    render();
+  } catch (e) {
+    $('start-err').textContent = e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadEngines() {
+  try {
+    const engines = await api('/api/engines');
+    for (const sel of [$('in-black'), $('in-white')]) {
+      sel.innerHTML = '';
+      for (const e of engines) {
+        const opt = document.createElement('option');
+        opt.value = e.key;
+        opt.textContent = `${e.name} ${e.version}`;
+        sel.appendChild(opt);
+      }
+    }
+    if (engines.length > 1) $('in-white').value = engines[1].key;
+  } catch (e) { /* 忽略 */ }
+}
+
+/* ---------------- 交互 ---------------- */
+
+$('btn-start').onclick = startMatch;
+$('slider').oninput = (ev) => { replayIndex = Number(ev.target.value); render(); };
+$('btn-prev').onclick = () => {
+  const total = (current?.moves || []).length;
+  replayIndex = Math.max(0, (replayIndex === null ? total : replayIndex) - 1);
+  render();
+};
+$('btn-next').onclick = () => {
+  const total = (current?.moves || []).length;
+  if (replayIndex === null) return;
+  replayIndex = Math.min(total, replayIndex + 1);
+  if (replayIndex >= total) replayIndex = null;   // 到底即回到实时
+  render();
+};
+$('btn-live').onclick = () => { replayIndex = null; render(); };
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') $('btn-prev').click();
+  else if (e.key === 'ArrowRight') $('btn-next').click();
+});
+
+loadEngines();
+refreshHistory();
+poll();
+setInterval(poll, 350);
+setInterval(refreshHistory, 5000);
+</script>
+</body>
+</html>
