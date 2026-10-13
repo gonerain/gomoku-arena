@@ -20,6 +20,7 @@ SUITES = [
     ("身份与推理接口", "test_identity.py", False),
     ("健壮性/句柄/进程树", "test_robustness.py", False),
     ("HTTP API", "test_api.py", True),
+    ("人类玩家接入", "test_human.py", True),
     ("E2E-A 双模型 20 局", "test_dual_models.py", False),
     ("E2E-B 100 局稳定性", "test_stability.py", False),
     ("E2E-C 批量实时观战", "test_batch_spectate.py", False),

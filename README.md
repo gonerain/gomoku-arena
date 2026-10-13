@@ -127,6 +127,44 @@ codex         ckpt_test 白      10    0   10    0    0    0    0       0    0.0
 浏览器里也能开批量对战，「批量（交换先手）」按钮旁边可分别填两边的**引擎、身份 id 与权重路径**；
 面板实时显示进度、当前局 ID 与分色统计，并可随时中止。
 
+## 跟模型下一盘（人类玩家）
+
+人也可以作为一个"引擎"参赛：适配器 `engines/py_human/` 遵守同一套协议，只是"想棋"这一步
+改为等你落子。裁判、计时、棋谱、实时观战全部复用既有路径，人机对局与机机对局走的是同一条链路。
+
+**方式一：浏览器点棋盘（推荐）**
+
+```powershell
+cd D:\Code\platform
+python -m gomoku_arena.server --port 8090          # 若未启动
+python -m gomoku_arena.cli --config matchups/play_human_vs_dsh.json --move-timeout 120000
+#  或对手换成 Codex：
+python -m gomoku_arena.cli --config matchups/play_human_vs_codex.json --move-timeout 120000
+```
+
+打开 http://127.0.0.1:8090 —— 轮到人类时，棋盘下方会亮起「轮到你了 —— 点击棋盘落子」，
+直接点交叉点即可。你的落子会立刻出现在棋盘上，模型随之应答。
+`--move-timeout 120000` 是给你的思考时间（2 分钟/手），太短会被裁判判超时。
+
+**方式二：终端敲坐标**
+
+同一局也可以用 curl 落子（终端和浏览器可以混用，都是往同一个队列写）：
+
+```powershell
+curl -X POST http://127.0.0.1:8090/api/human/black/<对局ID>/move `
+     -H "Content-Type: application/json" -d '{"x":7,"y":7}'
+```
+
+对局 ID 在 CLI 的第一行输出里；坐标 `x` = 列 0..14，`y` = 行 0..14，天元 `(7,7)`。
+适配器的提示信息里也会直接打印出这条命令（含正确 ID）。
+
+**说明**
+
+- 人类适配器**不会自己判超时**：到点由裁判判 `timeout`，这样判罚理由正确（而非记成进程崩溃）。
+- 落子通过 `/api/human/<color>/<game_id>/move` 注入：以**颜色**寻址（`black`/`white`），
+  平台会校验"是否轮到该方""该方是否确为人类""落点是否合法"，不合法返回 409。
+- 人类适配器的 `meta.baseline=true`、`algo=human`，不会被当成 RL 模型计入模型统计。
+
 ## 引擎协议（全部内容）
 
 **stdin 收 JSON，stdout 发 JSON，每行一个对象；调试日志一律走 stderr。** 整局只有 4 种帧：
@@ -302,6 +340,7 @@ engines/
 ├─ py_random/                最小实现，兼作协议自检（基线）
 ├─ py_greedy/                一步贪心，RL 训练的有意义基线（基线）
 ├─ py_trained/               ← RL 接入点（含 checkpoint 诚实性检查，无静默回退）
+├─ py_human/                 人类玩家适配器（浏览器点棋盘落子）
 ├─ py_ckpt_test/             测试用权重驱动策略（验收双模型身份，非 RL）
 └─ test_slow|test_crash|test_illegal/   故障注入引擎（验收判罚与进程树清理）
 tests/
@@ -309,6 +348,8 @@ tests/
 ├─ test_robustness.py        判罚归责 / 句柄所有权 / 进程树清理 / checkpoint 诚实性
 ├─ test_identity.py          参赛方身份、统计不混淆、推理接口
 ├─ test_api.py               HTTP 接口、回放、批量统计
+├─ test_human.py             人类玩家接入（落子注入、回合校验、拒绝非法落子）
+├─ test_human_vs_model.py    人机对弈链路（人类 vs 真实模型权重）
 ├─ test_dual_models.py       E2E-A：两份不同权重跑 20 局
 ├─ test_stability.py         E2E-B：100 局连续稳定性与资源泄漏监测
 ├─ test_batch_spectate.py    E2E-C：批量实时观战与回放隔离
@@ -324,6 +365,8 @@ python tests/test_identity.py         # 身份三层分离、统计不混淆、�
 python tests/test_robustness.py       # 判罚归责 + 句柄所有权 + 进程树清理 + checkpoint 诚实性
 python -m gomoku_arena.server --port 8090 &
 python tests/test_api.py              # 接口、回放、批量统计与交换先手
+python tests/test_human.py            # 人类玩家接入（需要 8090 上有平台实例）
+python tests/test_human_vs_model.py   # 人机对弈链路（人类 vs 真实模型）
 # 端到端（各自拉起独立端口的平台实例，互不干扰）
 python tests/test_dual_models.py      # A：两份不同模型权重，20 局
 python tests/test_stability.py        # B：100 局稳定性 + 资源泄漏 + 崩溃清理

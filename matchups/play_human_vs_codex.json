@@ -1,0 +1,15 @@
+{
+  "_comment": "我(人类)执黑 先手，对手 Codex。用法：python -m gomoku_arena.cli --config matchups/play_human_vs_codex.json --move-timeout 120000 --board",
+  "black": {
+    "engine": "human",
+    "pid": "you",
+    "name": "我"
+  },
+  "white": {
+    "engine": "C:\\Users\\Gonerain\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\python\\python.exe D:\\Code\\codex_gomoku\\engine.py",
+    "pid": "codex",
+    "name": "Codex",
+    "version": "v1",
+    "checkpoint": "D:\\Code\\codex_gomoku\\final_model.json"
+  }
+}

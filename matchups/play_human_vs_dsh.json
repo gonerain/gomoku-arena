@@ -1,0 +1,15 @@
+{
+  "_comment": "我(人类)执黑 先手，对手 DSH。用法：python -m gomoku_arena.cli --config matchups/play_human_vs_dsh.json --move-timeout 120000 --board",
+  "black": {
+    "engine": "human",
+    "pid": "you",
+    "name": "我"
+  },
+  "white": {
+    "engine": "C:\\Python313\\python.exe D:\\Code\\dsh_gomoku\\arena\\engines\\py_trained\\engine.py",
+    "pid": "dsh",
+    "name": "DSH",
+    "version": "v1",
+    "checkpoint": "D:\\Code\\dsh_gomoku\\runs\\az\\checkpoints\\chosen.pt"
+  }
+}

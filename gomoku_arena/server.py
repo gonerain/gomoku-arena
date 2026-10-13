@@ -54,6 +54,9 @@ RULE_SUMMARY = (
     f"{BOARD_SIZE}×{BOARD_SIZE} · 黑先 · ≥5 连（横/竖/斜）获胜 · 双方无禁手 · 无开局规则 · 满盘平局"
 )
 
+# 人类适配器默认回连地址（引擎进程内部据此轮询落子）
+DEFAULT_PLATFORM_URL = os.environ.get("GOMOKU_PLATFORM_URL", "http://127.0.0.1:8090")
+
 
 def _engine_spec(engine: str, name: str, version: str, meta: dict, env: dict | None = None) -> dict:
     return {
@@ -98,6 +101,14 @@ ENGINES: dict[str, dict] = {
         {"algo": "crash", "baseline": True, "test_only": True,
          "desc": "故障注入引擎（必崩），仅用于验收清理逻辑"},
     ),
+    # 人类玩家：以引擎进程形式接入，落子由浏览器点棋盘 POST 注入。
+    # 平台在启动时会自动注入 GOMOKU_PLATFORM_URL 与 GOMOKU_HUMAN_PID。
+    "human": _engine_spec(
+        "py_human", "human", "v0",
+        {"algo": "human", "baseline": True,
+         "desc": "人类玩家；在浏览器棋盘上点击落子"},
+        {"GOMOKU_HUMAN_PID": "human"},
+    ),
 }
 
 
@@ -119,6 +130,7 @@ def participant_for(
     checkpoint: str | None = None,
     meta: dict | None = None,
     move_delay_ms: int | None = None,
+    platform_url: str | None = None,
 ) -> Participant:
     """按"引擎程序 + 参赛方身份 + 权重"组装一个参赛方。
 
@@ -150,6 +162,10 @@ def participant_for(
     # 测试适配器支持人为步间延迟，便于验收观战采样（正式引擎不需要）
     if engine == "ckpt_test" and move_delay_ms:
         env["GOMOKU_TEST_MOVE_DELAY_MS"] = str(int(move_delay_ms))
+    if engine == "human":
+        # 人类适配器需要知道往哪个平台、以什么身份等落子
+        env["GOMOKU_PLATFORM_URL"] = platform_url or DEFAULT_PLATFORM_URL
+        env["GOMOKU_HUMAN_PID"] = resolved_pid
     spec["env"] = env
     spec["name"] = name or resolved_pid
     spec["version"] = resolved_version
@@ -406,6 +422,51 @@ class Runner:
         self._batch_objects: dict[str, Batch] = {}
         self._lock = threading.Lock()
         self._threads: list[threading.Thread] = []
+        # 人类落子队列：{game_id: {"move": [x,y], "at": ts, "actor": pid}}
+        self._human_moves: dict[str, dict] = {}
+
+    # ---------- 人类落子 ----------
+
+    def human_pending(self, game_id: str, color: str) -> dict:
+        """人类适配器轮询这个：轮到它落子且已有输入时返回坐标。
+
+        取出即消费（弹队列）：否则同一个坐标会被它反复当成"最新一步"。
+        """
+        with self._lock:
+            pending = self._human_moves.get(game_id)
+            if pending and pending.get("color") == color:
+                self._human_moves.pop(game_id, None)
+                return {"game_id": game_id, "move": list(pending["move"])}
+        return {"game_id": game_id, "move": None}
+
+    def submit_human_move(self, game_id: str, color: str, x: int, y: int) -> dict:
+        """接收人类落子。
+
+        裁判的 turn 字段是**颜色**（black/white），所以这里以颜色寻址，而不是 pid；
+        同时校验该颜色确实是人类玩家。落点合法性也在这里先挡一道。
+        """
+        with self._lock:
+            snapshot = self.games.get(game_id)
+        if snapshot is None:
+            raise ValueError(f"未找到进行中的对局 {game_id}")
+        if not is_running(snapshot):
+            raise ValueError(f"对局 {game_id} 已结束（status={snapshot.get('status')!r}）")
+        info = snapshot.get(color) or {}
+        if info.get("engine") != "human":
+            raise ValueError(
+                f"{color} 不是人类玩家（engine={info.get('engine')!r}），不能通过该接口落子"
+            )
+        if snapshot.get("turn") != color:
+            current = snapshot.get("turn")
+            current_pid = (snapshot.get(current) or {}).get("pid", current) if current else "无"
+            raise ValueError(f"现在不是 {color} 的回合（当前轮到 {current_pid}）")
+        if not (0 <= x < BOARD_SIZE and 0 <= y < BOARD_SIZE):
+            raise ValueError(f"坐标越界: ({x},{y})，合法范围 0..{BOARD_SIZE - 1}")
+        if any(m["x"] == x and m["y"] == y for m in snapshot.get("moves", [])):
+            raise ValueError(f"({x},{y}) 已有子")
+        with self._lock:
+            self._human_moves[game_id] = {"move": [x, y], "at": time.time(), "color": color}
+        return {"game_id": game_id, "color": color, "move": [x, y]}
 
     # ---------- 对局的注册与执行（单局与批量共用同一条路径） ----------
 
@@ -582,13 +643,22 @@ def _failed_record(match: Match, snapshot: dict, exc: Exception) -> dict:
     }
 
 
+def is_running(snapshot: dict) -> bool:
+    """对局是否仍在进行。
+
+    注意：Runner 内部保存的是**原始快照**，其中只有 status 字段；running 是 _effective()
+    在对外返回时才补上的派生字段。内部判断必须只看 status，否则会把进行中的对局当成已结束。
+    """
+    return (snapshot.get("status") or "running") == "running"
+
+
 def _effective(snapshot: dict | None) -> dict | None:
     """统一对外状态的形态：补上 status 与 running。"""
     if snapshot is None:
         return None
     out = dict(snapshot)
     out.setdefault("status", "finished")
-    out["running"] = out["status"] == "running"
+    out["running"] = is_running(out)
     out.setdefault("move_count", len(out.get("moves", [])))
     return out
 
@@ -616,8 +686,18 @@ class Handler(BaseHTTPRequestHandler):
                     {"board_size": BOARD_SIZE, "rule": RULE_SUMMARY,
                      "rule_id": "gomoku-freestyle-15"}
                 )
-            if route == "/api/engines":
-                return self._send_json(
+            if route.startswith("/api/human/"):
+                # 人类适配器轮询落子：/api/human/<color>/<game_id>/move
+                parts = route[len("/api/human/"):].split("/")
+                if len(parts) < 3 or parts[2] != "move":
+                    return self._send_json(
+                        {"error": "路径应为 /api/human/<color>/<game_id>/move；"
+                                  "color 取 black 或 white"}, 404)
+                color, game_id = parts[0], parts[1]
+                if color not in ("black", "white"):
+                    return self._send_json({"error": f"color 必须是 black/white，收到 {color!r}"}, 400)
+                return self._send_json(self.runner.human_pending(game_id, color))
+            if route == "/api/engines":                return self._send_json(
                     [
                         {
                             "key": key,
@@ -671,6 +751,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         route = urlparse(self.path).path
+        if route.startswith("/api/human/"):
+            return self._post_human_move(route)
         if route not in ("/api/matches", "/api/batches"):
             return self._send_json({"error": "not found"}, 404)
         try:
@@ -737,6 +819,30 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_json({"error": "not found"}, 404)
 
     # ---------- 工具 ----------
+
+    def _post_human_move(self, route: str) -> None:
+        """人类落子注入：POST /api/human/<color>/<game_id>/move  {"x":7,"y":7}"""
+        parts = route[len("/api/human/"):].split("/")
+        if len(parts) < 3 or parts[2] != "move":
+            return self._send_json(
+                {"error": "路径应为 /api/human/<color>/<game_id>/move"}, 404)
+        color, game_id = parts[0], parts[1]
+        if color not in ("black", "white"):
+            return self._send_json({"error": f"color 必须是 black/white，收到 {color!r}"}, 400)
+        try:
+            body = self._read_json()
+        except ValueError as exc:
+            return self._send_json({"error": str(exc)}, 400)
+        x, y = body.get("x"), body.get("y")
+        for value in (x, y):
+            if not isinstance(value, int) or isinstance(value, bool):
+                return self._send_json({"error": f"x/y 必须是整数，收到 x={x!r} y={y!r}"}, 400)
+        try:
+            result = self.runner.submit_human_move(game_id, color, x, y)
+        except ValueError as exc:
+            return self._send_json({"error": str(exc)}, 409)
+        print(f"[human] 人类({color}) 在 {game_id} 落子 ({x},{y})", file=sys.stderr)
+        return self._send_json(result, 202)
 
     def _read_json(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
