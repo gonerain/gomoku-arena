@@ -3,6 +3,12 @@
 裁判是唯一权威：落子合法性、单步超时、崩溃、脏输出全部由这里判定。
 引擎协议（全部 4 种帧）见 rules.PROTOCOL。
 
+身份模型（三层分离，避免"同一个适配器加载不同权重"时混淆）：
+    participant 参赛方  —— 统计与棋谱的唯一标识（如 dsh / codex）
+    engine      引擎程序 —— 说协议的适配器进程（DSH 与 Codex 可以用同一个）
+    checkpoint  模型权重 —— 同一适配器加载的不同权重
+DSH 与 Codex 完全可以共用 `trained` 适配器，只要 participant 与 checkpoint 不同。
+
 超时归责原则（公平性）：
   * 单步超时 = 该方自己的问题，判该方负（reason=timeout）。
   * 整局墙钟上限是"平台为了防止对局无限拖下去"而设的护栏，双方共享同一份时间，
@@ -33,6 +39,90 @@ PLAYER_FAULTS = {
     "START_FAILED",
 }
 
+DEFAULT_CHECKPOINT = "none"
+
+
+class Participant:
+    """一个参赛方：谁在下棋，用哪个引擎程序，加载哪份权重。"""
+
+    def __init__(
+        self,
+        pid: str,
+        name: str | None = None,
+        engine: str | None = None,
+        version: str = "v0",
+        checkpoint: str | None = None,
+        meta: dict | None = None,
+        spec: dict | None = None,
+    ):
+        if not pid:
+            raise ValueError("参赛方必须有唯一 id")
+        self.pid = pid
+        self.name = name or pid
+        self.engine = engine or pid          # 引擎程序标识；可选集合见 server.ENGINES
+        self.version = version
+        self.checkpoint = checkpoint or DEFAULT_CHECKPOINT
+        self.meta = dict(meta or {})
+        self.spec = dict(spec or {})
+        self.spec.setdefault("name", self.name)
+        self.spec.setdefault("version", self.version)
+
+    def for_color(self, color: str) -> dict:
+        """该参赛方执某色时的棋谱记录片段。"""
+        return {
+            "pid": self.pid,
+            "name": self.name,
+            "engine": self.engine,
+            "version": self.version,
+            "color": color,
+            "checkpoint": self.checkpoint,
+            "meta": dict(self.meta),
+        }
+
+    def to_dict(self) -> dict:
+        return {
+            "pid": self.pid,
+            "name": self.name,
+            "engine": self.engine,
+            "version": self.version,
+            "checkpoint": self.checkpoint,
+            "meta": dict(self.meta),
+        }
+
+
+def participant_from_spec(spec: dict, color: str | None = None, pid: str | None = None) -> Participant:
+    """把旧的"裸引擎规格"包装成参赛方，保持向后兼容。"""
+    meta = dict(spec.get("meta") or {})
+    return Participant(
+        pid=pid or spec.get("name") or "engine",
+        name=spec.get("name") or pid or "engine",
+        engine=spec.get("engine") or spec.get("name") or pid or "engine",
+        version=str(spec.get("version") or "v0"),
+        checkpoint=spec.get("checkpoint") or meta.get("checkpoint"),
+        meta=meta,
+        spec=spec,
+    )
+
+
+def check_distinct(black: Participant, white: Participant) -> None:
+    """两份配置必须真的不同，否则"两个模型对战"就是自欺欺人。
+
+    只有**非基线**引擎（即真正的模型接入点）才强制权重必须不同：
+    基线引擎（random/greedy）之间同配置对局是有意义的自检，不拦。
+    """
+    if black.pid == white.pid:
+        raise ValueError(
+            f"黑方与白方使用了相同的参赛方 id {black.pid!r}；"
+            f"DSH 与 Codex 必须用不同的 pid 区分身份"
+        )
+    if black.engine != white.engine or black.checkpoint == DEFAULT_CHECKPOINT:
+        return
+    if black.checkpoint == white.checkpoint and black.version == white.version:
+        raise ValueError(
+            f"双方用同一个引擎加载了同一份权重（{black.checkpoint}）且版本相同："
+            f"这不会产生有意义的对比结果。请为双方指定各自的 checkpoint"
+        )
+
 
 class MatchConfig:
     def __init__(
@@ -56,20 +146,24 @@ class MatchConfig:
 class Match:
     def __init__(
         self,
-        black_spec: dict,
-        white_spec: dict,
+        black,
+        white,
         config: MatchConfig | None = None,
         on_progress=None,
         batch: dict | None = None,
     ):
         self.config = config or MatchConfig()
-        self.specs = {"black": black_spec, "white": white_spec}
+        self.participants = {
+            "black": black if isinstance(black, Participant) else participant_from_spec(black, "black"),
+            "white": white if isinstance(white, Participant) else participant_from_spec(white, "white"),
+        }
+        check_distinct(self.participants["black"], self.participants["white"])
         self.on_progress = on_progress
         self.batch = batch  # 批量对战的归属信息，会写进棋谱
         self.procs: dict[str, EngineProc] = {}
-        self.players = {
-            "black": _player_info(black_spec, "black"),
-            "white": _player_info(white_spec, "white"),
+        # 棋谱身份以参赛方为唯一标识；引擎自报信息另存，便于发现"注册名与自报名不一致"
+        self.identity = {
+            color: p.for_color(color) for color, p in self.participants.items()
         }
         self.game_id = f"g-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
 
@@ -151,15 +245,17 @@ class Match:
                 proc.close()
 
         record = {
-            "v": 1,
+            "v": 2,
             "game_id": self.game_id,
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "board_size": self.config.board_size,
             "seed": self.config.seed,
             "move_timeout_ms": self.config.move_timeout_ms,
             "game_timeout_ms": self.config.game_timeout_ms,
-            "black": self.players["black"],
-            "white": self.players["white"],
+            "participants": [p.to_dict() | {"color": color}
+                             for color, p in self.participants.items()],
+            "black": self.identity["black"],
+            "white": self.identity["white"],
             "moves": moves,
             "result": result,
             "duration_ms": int((time.monotonic() - started) * 1000),
@@ -174,7 +270,7 @@ class Match:
 
     def _handshake(self) -> None:
         for color in ("black", "white"):
-            proc = EngineProc(self.specs[color], color)
+            proc = EngineProc(self.participants[color].spec, color)
             self.procs[color] = proc
             try:
                 proc.start()
@@ -189,25 +285,29 @@ class Match:
                 )
             except EngineError as exc:
                 raise _blame(exc, color) from exc
+
         for color in ("black", "white"):
             try:
                 frame = self.procs[color].recv(self._handshake_timeout_ms())
             except EngineError as exc:
-                # 无论是超时还是崩溃，责任方都是"正在等 ready 的那一方"；
-                # 平台无法区分"加载慢"与"挂死"，但也没理由判对手赢。
+                # 无论是超时还是崩溃，责任方都是"正在等 ready 的那一方"
                 raise _blame(exc, color) from exc
             if frame.get("type") != "ready":
                 raise _blame(
                     EngineError("PROTOCOL", f"握手期望 ready，收到 {frame.get('type')!r}"), color
                 )
-            info = self.players[color]
-            info["name"] = str(frame.get("name") or info["name"])
-            info["version"] = str(frame.get("version") or info["version"])
-            spec_meta = dict(self.specs[color].get("meta") or {})
+            info = self.identity[color]
+            spec_meta = dict(self.participants[color].meta)
             self_meta = frame.get("meta") if isinstance(frame.get("meta"), dict) else {}
-            # 引擎自报的 meta 优先，但保留平台侧声明的字段（如 baseline/checkpoint）
+            # 引擎自报的 meta 与平台声明合并；平台声明的参赛身份字段优先
             info["meta"] = {**spec_meta, **self_meta}
-            info["checkpoint"] = str(info["meta"].get("checkpoint", "none"))
+            info["checkpoint"] = str(info["meta"].get("checkpoint") or info["checkpoint"])
+            info["reported"] = {
+                "name": str(frame.get("name") or ""),
+                "version": str(frame.get("version") or ""),
+            }
+            if info["reported"]["name"] and info["reported"]["name"] != info["name"]:
+                info["name_mismatch"] = info["reported"]["name"]
 
     def _ask(
         self, color: str, board: Board, moves: list[dict], global_deadline: float
@@ -283,14 +383,3 @@ def _blame(exc: EngineError, color: str) -> EngineError:
     """把责任方贴到异常上，供上层归因判负。"""
     exc.color = color  # type: ignore[attr-defined]
     return exc
-
-
-def _player_info(spec: dict, color: str) -> dict:
-    meta = dict(spec.get("meta") or {})
-    return {
-        "name": spec.get("name", "unknown"),
-        "version": spec.get("version", "v0"),
-        "color": color,
-        "meta": meta,
-        "checkpoint": str(spec.get("checkpoint") or meta.get("checkpoint") or "none"),
-    }

@@ -23,9 +23,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "engines"))
 
-from gomoku_arena.engine_host import EngineProc, _close_handle_once, _create_kill_on_close_job  # noqa: E402
+from gomoku_arena.engine_host import (  # noqa: E402
+    EngineProc,
+    JobHandle,
+    _create_kill_on_close_job,
+)
 from gomoku_arena.match import Match, MatchConfig  # noqa: E402
 from gomoku_arena.server import launch_spec  # noqa: E402
+
+try:
+    import psutil
+except Exception:  # pragma: no cover
+    psutil = None
 
 results: list[tuple[bool, str, str]] = []
 not_verified: list[str] = []
@@ -343,11 +352,67 @@ def test_trained_exit_code_contract() -> None:
 
 def test_job_object_available() -> None:
     job = _create_kill_on_close_job()
-    ok = job is not None
-    _close_handle_once(job)
-    _close_handle_once(job)  # 重复关闭必须安全
-    check(ok, "Windows Job Object 可用且句柄可重复关闭",
-          "" if ok else "不可用，将退回 best-effort 清理")
+    check(job is not None, "Windows Job Object 可用（kill-on-close）",
+          "" if job else "不可用，将退回 best-effort 清理")
+    if job is None:
+        return
+    check(isinstance(job, JobHandle) and not job.closed,
+          "Job 返回带所有权标记的句柄对象", f"type={type(job).__name__}")
+    first = job.close()
+    second = job.close()
+    check(first is True and second is False and job.closed,
+          "同一句柄只被真正关闭一次（第二次调用直接返回，不再触碰内核对象）",
+          f"first={first} second={second} closed={job.closed}")
+
+
+def test_handle_reuse_is_safe() -> None:
+    """句柄值会被系统复用：不能靠"句柄数值"记忆是否关过。
+
+    这里交错创建/关闭多个 Job，若实现仍按数值记账，后创建的 Job 只要拿到刚被
+    回收的句柄值就会被误判为"已关闭"从而漏关（表现为句柄泄漏）。
+    """
+    if os.name != "nt":
+        skip("句柄值复用安全", "非 Windows 环境")
+        return
+    handles = []
+    for _ in range(6):
+        job = _create_kill_on_close_job()
+        if job is None:
+            check(False, "句柄值复用安全", "无法创建 Job")
+            return
+        handles.append(job)
+        job.close()
+    values = [h.value for h in handles]
+    duplicates = len(values) != len(set(values))
+    check(duplicates,
+          "确实观察到了句柄值复用（说明本测试有意义）",
+          f"values={values}")
+    check(all(h.closed for h in handles), "所有 Job 都被各自正确关闭")
+
+
+def test_handle_count_stable() -> None:
+    """连续多局后本进程句柄数不应持续增长。"""
+    if os.name != "nt" or psutil is None:
+        skip("句柄数稳定性", "需要 Windows + psutil")
+        return
+    me = psutil.Process()
+
+    def spawn_cycle(rounds: int) -> None:
+        for _ in range(rounds):
+            proc = EngineProc(spec_for("py_random"), "handles")
+            proc.start()
+            proc.send({"type": "init", "game_id": "t", "board_size": 15,
+                       "color": "black", "seed": 1})
+            proc.recv(5000)
+            proc.close()
+
+    spawn_cycle(3)  # 预热：排除首次分配带来的固定增量
+    before = me.num_handles()
+    spawn_cycle(8)
+    after = me.num_handles()
+    check(after <= before + 4,
+          "8 轮引擎启停后句柄数没有持续增长",
+          f"{before} -> {after}（允许 +4 抖动）")
 
 
 def test_close_is_idempotent() -> None:
@@ -399,6 +464,8 @@ def main() -> int:
     print("=== 五子棋平台健壮性自检 ===\n")
     for fn in (
         test_job_object_available,
+        test_handle_reuse_is_safe,
+        test_handle_count_stable,
         test_normal_match,
         test_per_move_timeout,
         test_global_timeout_is_neutral,

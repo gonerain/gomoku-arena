@@ -116,16 +116,24 @@
 
     <div class="card">
       <h2>开新局 / 批量对战</h2>
-      <div class="row"><label>黑方</label><select id="in-black"></select></div>
-      <div class="row"><label>白方</label><select id="in-white"></select></div>
-      <div class="row"><label>每步 ms</label><input id="in-move" type="number" value="1000" min="50" step="50"></div>
-      <div class="row"><label>整局 ms</label><input id="in-game" type="number" value="120000" min="1000" step="1000"></div>
-      <div class="row"><label>局数</label><input id="in-games" type="number" value="10" min="1" max="500" step="1"></div>
-      <div class="row"><label>随机种子</label><input id="in-seed" type="number" placeholder="留空则随机"></div>
+      <div class="row"><label>黑方引擎</label><select id="in-black"></select></div>
+      <div class="row"><label>黑方身份</label>
+        <input id="in-black-pid" placeholder="参赛方 id，如 dsh">
+        <input id="in-black-ckpt" placeholder="权重路径（trained 必填）"></div>
+      <div class="row"><label>白方引擎</label><select id="in-white"></select></div>
+      <div class="row"><label>白方身份</label>
+        <input id="in-white-pid" placeholder="参赛方 id，如 codex">
+        <input id="in-white-ckpt" placeholder="权重路径（trained 必填）"></div>
+      <div class="row"><label>每步 ms</label><input id="in-move" type="number" value="1000" min="50" step="50" style="flex:1"></div>
+      <div class="row"><label>整局 ms</label><input id="in-game" type="number" value="120000" min="1000" step="1000" style="flex:1"></div>
+      <div class="row"><label>局数</label><input id="in-games" type="number" value="10" min="1" max="500" step="1" style="flex:1"></div>
+      <div class="row"><label>随机种子</label><input id="in-seed" type="number" placeholder="留空则随机" style="flex:1"></div>
       <div class="btn-row">
         <button id="btn-start" style="flex:1">单局</button>
         <button id="btn-batch" style="flex:1" class="ghost">批量（交换先手）</button>
       </div>
+      <div class="hint">双方可选用同一个适配器（trained）但必须指定各自的权重路径与身份 id；
+        权重随参赛方移动，不随棋子颜色。</div>
       <div class="err" id="start-err"></div>
       <div id="batch-panel" style="display:none">
         <div class="bar"><i id="batch-bar"></i></div>
@@ -185,6 +193,7 @@ let replayIndex = null;   // null = 跟随末尾；数字 = 停在第 N 手
 let recentGames = [];     // 最近对局列表（不含着法）
 let stats = null;         // 完整统计（/api/stats）
 let activeBatch = null;   // 正在跟踪的批量对战 id
+let batchSummary = null;  // 当前批量对战的最新摘要
 let lastLiveId = null;
 
 /* ---------------- 棋盘几何与绘制 ---------------- */
@@ -331,14 +340,28 @@ function playerCard(el, p, isTurn) {
   el.querySelector('.ver').textContent = p.version || '';
   const meta = p.meta || {};
   const bits = [];
+  if (p.pid && p.pid !== p.name) bits.push('id=' + p.pid);
+  if (p.engine) bits.push('引擎=' + p.engine);
   if (meta.baseline) bits.push('基线·非RL');
   else if (meta.algo) bits.push(meta.algo);
-  if (p.checkpoint && p.checkpoint !== 'none') bits.push('ckpt=' + p.checkpoint);
+  if (p.checkpoint && p.checkpoint !== 'none') bits.push('权重=' + p.checkpoint);
+  // 引擎自报名称与平台注册名不一致时明确提示，避免身份误读
+  if (p.name_mismatch) bits.push('⚠自报名=' + p.name_mismatch);
   if (meta.episodes != null) bits.push('ep=' + meta.episodes);
   if (meta.sims != null) bits.push('sims=' + meta.sims);
   if (meta.budget) bits.push('budget=' + meta.budget);
   el.querySelector('.meta').textContent = bits.join(' · ');
   el.classList.toggle('turn', !!isTurn);
+}
+
+function batchTag(game) {
+  const info = game && game.batch;
+  if (!info) return '';
+  const summary = batchSummary && batchSummary.batch_id === info.batch_id ? batchSummary : null;
+  const played = summary ? summary.played : info.index - 1;
+  const of = info.of || (summary && summary.requested);
+  return `<span class="tag">批量 ${info.batch_id}</span>第 ${info.index}/${of} 局`
+    + (summary ? `（已完成 ${played} 局）` : '');
 }
 
 function render() {
@@ -367,9 +390,12 @@ function render() {
     const res = replayGame.result || {};
     banner.innerHTML = '<span class="tag">历史回放</span>' + describeResult(replayGame, res);
   } else if (running) {
-    banner.textContent = `进行中 · 第 ${total + 1} 手 · ${game.turn === 'black' ? '黑方' : '白方'}思考中`;
+    const tag = batchTag(game);
+    banner.innerHTML = (tag ? tag + ' · ' : '')
+      + `进行中 · 第 ${total + 1} 手 · ${game.turn === 'black' ? '黑方' : '白方'}思考中`;
   } else {
-    banner.textContent = describeResult(game, game.result || {});
+    const tag = batchTag(game);
+    banner.innerHTML = (tag ? tag + ' · ' : '') + describeResult(game, game.result || {});
   }
 
   $('slider').max = String(total);
@@ -437,17 +463,19 @@ function renderStats() {
   $('stats-scope').textContent = `全部 ${stats.total_games} 局`;
   const box = $('t-engines');
   box.innerHTML = '';
-  if (!stats.engines.length) return;
+  const list = stats.participants || stats.engines || [];
+  if (!list.length) return;
   const table = document.createElement('table');
-  table.innerHTML = '<thead><tr><th>引擎</th><th class="num">局</th><th class="num">胜</th>'
+  table.innerHTML = '<thead><tr><th>参赛方</th><th class="num">局</th><th class="num">胜</th>'
     + '<th class="num">负</th><th class="num">平</th><th class="num">超时</th><th class="num">非法</th>'
     + '<th class="num">胜率</th></tr></thead>';
   const tb = document.createElement('tbody');
-  for (const e of stats.engines) {
+  for (const e of list) {
     const rate = e.win_rate == null ? '-' : (e.win_rate * 100).toFixed(1) + '%';
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${e.name}<br><span style="color:var(--dim);font-size:11px">`
-      + `${e.version}${e.checkpoint && e.checkpoint !== 'none' ? ' · ' + e.checkpoint : ''}</span></td>`
+    tr.innerHTML = `<td>${e.name || e.pid}<br><span style="color:var(--dim);font-size:11px">`
+      + `id=${e.pid || e.name} · ${e.engine || '?'} ${e.version || ''}`
+      + `${e.checkpoint && e.checkpoint !== 'none' ? '<br>权重=' + e.checkpoint : ''}</span></td>`
       + `<td class="num">${e.games}</td><td class="num">${e.win}</td><td class="num">${e.loss}</td>`
       + `<td class="num">${e.draw}</td><td class="num">${e.timeout}</td>`
       + `<td class="num">${e.illegal_move}</td><td class="num">${rate}</td>`;
@@ -459,21 +487,26 @@ function renderStats() {
 
 function renderBatch(batch) {
   if (!batch) { $('batch-panel').style.display = 'none'; return; }
+  batchSummary = batch;
   $('batch-panel').style.display = 'block';
   const played = batch.played || 0, requested = batch.requested || 0;
   $('batch-bar').style.width = requested ? `${Math.min(100, played / requested * 100)}%` : '0';
-  $('batch-progress').textContent = `${played} / ${requested} 局 · ${batch.status}`;
+  const current = batch.current_game_id
+    ? ` · 当前局 ${batch.current_game_id}` : '';
+  $('batch-progress').textContent = `${played} / ${requested} 局 · ${batch.status}${current}`;
   const box = $('batch-table');
   box.innerHTML = '';
   if (!batch.totals) return;
   const table = document.createElement('table');
   const tb = document.createElement('tbody');
-  for (const [name, t] of Object.entries(batch.totals)) {
+  for (const [pid, t] of Object.entries(batch.totals)) {
     const rate = t.win_rate == null ? '-' : (t.win_rate * 100).toFixed(1) + '%';
-    const b = batch.sides[name].as_black, w = batch.sides[name].as_white;
+    const side = batch.sides[pid];
+    const b = side.as_black, w = side.as_white;
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${name}</td><td class="num">${t.win}-${t.loss}-${t.draw}</td>`
-      + `<td class="num">胜率 ${rate}</td>`;
+    tr.innerHTML = `<td>${t.name}<br><span style="color:var(--dim);font-size:11px">id=${pid}`
+      + `${t.checkpoint && t.checkpoint !== 'none' ? ' · ' + t.checkpoint : ''}</span></td>`
+      + `<td class="num">${t.win}-${t.loss}-${t.draw}</td><td class="num">胜率 ${rate}</td>`;
     const tr2 = document.createElement('tr');
     tr2.innerHTML = `<td style="color:var(--dim);font-size:11px">执黑 ${b.win}-${b.loss}-${b.draw} `
       + `｜ 执白 ${w.win}-${w.loss}-${w.draw}</td>`
@@ -508,12 +541,22 @@ async function loadMeta() {
       }
     }
     if (engines.length > 1) $('in-white').value = engines[1].key;
+    // 双模型对战的默认身份：都是同一个 trained 适配器，只有权重不同
+    $('in-black-pid').value = 'dsh';
+    $('in-white-pid').value = 'codex';
   } catch (e) { /* 忽略 */ }
   try {
     const info = await api('/api/board');
     setupGeometry(info.board_size);
     $('rule-line').textContent = info.rule;
   } catch (e) { setupGeometry(15); }
+  try {
+    const models = await api('/api/models');
+    if (models.length) {
+      $('in-black-ckpt').placeholder = `可用: ${models[0].name}`;
+      $('in-white-ckpt').placeholder = `可用: ${models[models.length - 1].name}`;
+    }
+  } catch (e) { /* 忽略 */ }
 }
 
 async function refreshHistory() {
@@ -554,8 +597,13 @@ async function pollBatch() {
       activeBatch = null;
       refreshHistory();
       refreshStats();
+      render();
+      return;
     }
-  } catch (e) { activeBatch = null; }
+    setTimeout(pollBatch, POLL_BATCH_MS);
+  } catch (e) {
+    activeBatch = null;
+  }
 }
 
 function scheduleNext() {
@@ -607,16 +655,25 @@ async function startBatch() {
                                              body: JSON.stringify(body)});
     activeBatch = batch.batch_id;
     renderBatch(batch);
-    setInterval(pollBatch, POLL_BATCH_MS);
+    setTimeout(pollBatch, POLL_BATCH_MS);
   } catch (e) { $('start-err').textContent = e.message; }
   finally { btn.disabled = false; }
 }
 
 function collectForm() {
   const seedRaw = $('in-seed').value.trim();
+  const black = {engine: $('in-black').value};
+  const white = {engine: $('in-white').value};
+  const bpid = $('in-black-pid').value.trim();
+  const wpid = $('in-white-pid').value.trim();
+  const bckpt = $('in-black-ckpt').value.trim();
+  const wckpt = $('in-white-ckpt').value.trim();
+  if (bpid) black.pid = bpid;
+  if (wpid) white.pid = wpid;
+  if (bckpt) black.checkpoint = bckpt;
+  if (wckpt) white.checkpoint = wckpt;
   const body = {
-    black: $('in-black').value,
-    white: $('in-white').value,
+    participants: {black, white},
     move_timeout_ms: Number($('in-move').value) || 1000,
     game_timeout_ms: Number($('in-game').value) || 120000,
   };

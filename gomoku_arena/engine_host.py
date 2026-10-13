@@ -49,7 +49,7 @@ class EngineProc:
         self._lines: queue.Queue[str | None] = queue.Queue()
         self._reader: threading.Thread | None = None
         self._closed = False
-        self._job = None
+        self._job: JobHandle | None = None
         self._job_assigned = False
         self._exit_code: int | None = None
 
@@ -116,27 +116,29 @@ class EngineProc:
                 **kwargs,
             )
         except OSError as exc:
-            _close_handle_once(job)
+            if job is not None:
+                job.close()
             raise EngineError("START_FAILED", f"无法启动引擎 {self.label}: {exc}") from exc
 
         if suspended:
             self._finish_suspended_start(job)
-        else:
-            _close_handle_once(job)  # 没用上就立刻还回去，避免句柄泄漏
+        elif job is not None:
+            job.close()  # 没用上就立刻归还，避免句柄泄漏
 
         self._reader = threading.Thread(target=self._read_stdout, daemon=True)
         self._reader.start()
         threading.Thread(target=self._drain_stderr, daemon=True).start()
 
-    def _finish_suspended_start(self, job) -> None:
+    def _finish_suspended_start(self, job: "JobHandle") -> None:
         """把挂起的子进程放进 Job 并恢复运行；任一步失败都不能留下永久挂起的进程。"""
         assert self.proc is not None
         if _assign_to_job(job, self.proc):
             self._job = job
             self._job_assigned = True
         else:
-            # 入 Job 失败：Job 句柄对清理已无意义，立刻释放，退回 best-effort 路径
-            _close_handle_once(job)
+            # 入 Job 失败：这个 Job 对清理已无意义，立刻关闭归还，
+            # 并退回 psutil / taskkill 的 best-effort 路径。
+            job.close()
             sys.stderr.write(
                 f"[engine_host] 警告: {self.label} 无法加入 Job Object，"
                 f"进程树清理退化为 best-effort\n"
@@ -168,8 +170,10 @@ class EngineProc:
             return
         self._closed = True
         proc = self.proc
+        job = self._job if self._job_assigned else None
         if proc is None:
-            _close_handle_once(self._job)
+            if job is not None:
+                job.close()
             self._job = None
             return
         try:
@@ -177,8 +181,10 @@ class EngineProc:
                 proc.stdin.close()
         except OSError:
             pass
-        _kill_tree(proc, job=self._job if self._job_assigned else None)
-        self._job = None
+        _kill_tree(proc, job=job)
+        if self._job is not None:
+            # _kill_tree 已负责关闭入 Job 的句柄；未入 Job 的句柄已在上一步归还
+            self._job = None
 
     # ---------- 收发 ----------
 
@@ -248,7 +254,7 @@ class EngineProc:
                f"可能是它派生的后代仍持有 stdout 管道）"
 
 
-def _kill_tree(proc: subprocess.Popen, job=None, grace: float = 0.3) -> None:
+def _kill_tree(proc: subprocess.Popen, job: "JobHandle | None" = None, grace: float = 0.3) -> None:
     """确保进程及其所有后代都被结束。
 
     引擎完全可能派生子进程（搜索 worker、DataLoader 等），只杀父进程会留下孤儿
@@ -266,9 +272,9 @@ def _kill_tree(proc: subprocess.Popen, job=None, grace: float = 0.3) -> None:
     except subprocess.TimeoutExpired:
         pass
 
-    # 2) Job Object：关句柄即整棵树终结（幂等，重复调用安全）
+    # 2) Job Object：关句柄即整棵树终结（同一声明周期内重复调用安全，只关一次）
     if job is not None:
-        _close_handle_once(job)
+        job.close()
 
     # 3) psutil 递归（父进程还活着才有意义）
     if psutil is not None and proc.poll() is None:
@@ -336,35 +342,51 @@ def _safe_kill(target) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Windows 句柄管理：每个句柄只关闭一次
+# Windows 句柄所有权
+#
+# 为什么不用"全局已关闭句柄值集合"：Windows 的句柄值会被系统复用，一旦某个值被
+# 回收后又分配给新句柄，按值记账就会误判"已经关过了"从而漏关，或对已复用的句柄
+# 重复关闭。正确做法是让每个句柄对象的生命周期自带 closed 标记，谁创建谁负责关一次。
 # ---------------------------------------------------------------------------
 
-_closed_handles: set[int] = set()
-_handle_lock = threading.Lock()
+class JobHandle:
+    """一个 kill-on-close 的 Job Object 句柄，自带"只关一次"的生命周期标记。"""
 
+    __slots__ = ("value", "foreign_function", "_closed", "_lock")
 
-def _close_handle_once(handle) -> None:
-    """关闭句柄，且保证同一个句柄不会被关第二次。
+    def __init__(self, value: int, foreign_function=None):
+        self.value = int(value)
+        # 持有 WinDLL 的引用，防止 ctypes 把 ForeignFunction 回收掉导致句柄失效
+        self.foreign_function = foreign_function
+        self._closed = False
+        self._lock = threading.Lock()
 
-    重复 CloseHandle 会破坏无关的内核对象（句柄值可能已被复用），
-    因此这里按句柄值记账，而不是靠调用方小心。
-    """
-    if not handle:
-        return
-    key = int(handle)
-    with _handle_lock:
-        if key in _closed_handles:
-            return
-        _closed_handles.add(key)
-    if not _JOB_AVAILABLE or os.name != "nt":
-        return
-    try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CloseHandle.restype = ctypes.c_int
-        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel32.CloseHandle(ctypes.c_void_p(key))
-    except Exception:
-        pass
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> bool:
+        """关闭句柄。重复调用是安全的，第二次不再触碰内核对象。"""
+        with self._lock:
+            if self._closed:
+                return False
+            self._closed = True
+        if not _JOB_AVAILABLE or os.name != "nt":
+            return True
+        try:
+            kernel32 = self.foreign_function or ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CloseHandle.restype = ctypes.c_int
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle(ctypes.c_void_p(self.value))
+        except Exception:
+            pass
+        return True
+
+    def __enter__(self) -> "JobHandle":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +455,7 @@ class _ThreadEntry32(ctypes.Structure):
     ]
 
 
-def _create_kill_on_close_job():
+def _create_kill_on_close_job() -> "JobHandle | None":
     """建一个"句柄关闭即杀死组内所有进程"的 Job。失败返回 None，退回 best-effort。"""
     if not _JOB_AVAILABLE or os.name != "nt":
         return None
@@ -441,27 +463,28 @@ def _create_kill_on_close_job():
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = ctypes.c_void_p
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
+        raw = kernel32.CreateJobObjectW(None, None)
+        if not raw:
             return None
+        handle = JobHandle(raw, foreign_function=kernel32)
         info = _JobExtendedLimitInformation()
         info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         ok = kernel32.SetInformationJobObject(
-            ctypes.c_void_p(job),
+            ctypes.c_void_p(handle.value),
             _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
             ctypes.byref(info),
             ctypes.sizeof(info),
         )
         if not ok:
-            _close_handle_once(job)
+            handle.close()  # 配置失败：立刻归还这个刚创建的 Job
             return None
-        return job
+        return handle
     except Exception:
         return None
 
 
-def _assign_to_job(job, proc: subprocess.Popen) -> bool:
-    if not _JOB_AVAILABLE or os.name != "nt":
+def _assign_to_job(job: "JobHandle", proc: subprocess.Popen) -> bool:
+    if not _JOB_AVAILABLE or os.name != "nt" or job is None or job.closed:
         return False
     try:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -475,7 +498,7 @@ def _assign_to_job(job, proc: subprocess.Popen) -> bool:
         try:
             for attempt in (1, 2):  # 极小概率的瞬时失败，重试一次即可
                 if kernel32.AssignProcessToJobObject(
-                    ctypes.c_void_p(job), ctypes.c_void_p(handle)
+                    ctypes.c_void_p(job.value), ctypes.c_void_p(handle)
                 ):
                     return True
                 if attempt == 1:

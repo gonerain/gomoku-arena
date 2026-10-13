@@ -1,0 +1,8 @@
+{
+  "name": "model-b",
+  "version": "tb2",
+  "policy_version": 7,
+  "bias": 11,
+  "prefer_center": false,
+  "_comment": "测试权重 B：policy_version=7、bias=11，与 A 明显不同，着法序列必须可区分。"
+}

@@ -33,7 +33,12 @@ DIRECTIONS = ((1, 0), (0, 1), (1, 1), (1, -1))
 
 
 class GameView:
-    """把协议里的 moves 历史整理成引擎好用的形式。只读。"""
+    """把协议里的 moves 历史整理成引擎好用的形式。只读。
+
+    可用接口：board_size / grid / history / count / last_move /
+    in_bounds() / is_empty() / free_cells() / neighbors(distance) / would_win()。
+    RL 侧做推理时通常用 is_empty() 或 legal_mask() 屏蔽非法点。
+    """
 
     def __init__(self, board_size: int, moves: list[list]):
         self.board_size = board_size
@@ -48,6 +53,13 @@ class GameView:
     @property
     def last_move(self) -> tuple[int, int] | None:
         return self.history[-1] if self.history else None
+
+    def in_bounds(self, x: int, y: int) -> bool:
+        """坐标是否在棋盘内。真实推理返回的落点必须先过这一关。"""
+        return 0 <= x < self.board_size and 0 <= y < self.board_size
+
+    def is_empty(self, x: int, y: int) -> bool:
+        return self.in_bounds(x, y) and self.grid[y][x] == 0
 
     def free_cells(self) -> list[tuple[int, int]]:
         size = self.board_size

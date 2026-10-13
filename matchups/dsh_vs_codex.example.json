@@ -1,0 +1,19 @@
+{
+  "_comment": "示例：DSH 与 Codex 共用同一个 trained 适配器，但各自加载自己的权重与版本。把 checkpoint 换成真实模型路径即可用于正式比赛。",
+  "black": {
+    "engine": "trained",
+    "pid": "dsh",
+    "name": "DSH",
+    "version": "v3",
+    "checkpoint": "checkpoints/dsh_ppo_v3.pt",
+    "meta": {"algo": "ppo", "episodes": 12000, "budget": "2e6 steps"}
+  },
+  "white": {
+    "engine": "trained",
+    "pid": "codex",
+    "name": "Codex",
+    "version": "v7",
+    "checkpoint": "checkpoints/codex_az_v7.pt",
+    "meta": {"algo": "alphazero", "sims": 200}
+  }
+}

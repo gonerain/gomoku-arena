@@ -1,0 +1,8 @@
+{
+  "name": "model-a",
+  "version": "ta1",
+  "policy_version": 1,
+  "bias": 0,
+  "prefer_center": true,
+  "_comment": "测试权重 A：policy_version=1。不是 RL 训练产物，仅用于验证双模型身份不混淆。"
+}

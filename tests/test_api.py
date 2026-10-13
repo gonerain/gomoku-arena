@@ -14,8 +14,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8090"
+ROOT = Path(__file__).resolve().parent.parent
+MODEL_A = ROOT / "tests" / "models" / "model_a" / "meta.json"
+MODEL_B = ROOT / "tests" / "models" / "model_b" / "meta.json"
 results: list[tuple[bool, str, str]] = []
 not_verified: list[str] = []
 
@@ -135,9 +139,14 @@ def test_list_vs_full_stats() -> None:
     check(stats["black_wins"] + stats["white_wins"] + stats["draws"] <= stats["total_games"],
           "统计的黑胜/白胜/平数量自洽",
           f"{stats['black_wins']}/{stats['white_wins']}/{stats['draws']}")
-    fields = {"games", "win", "loss", "draw", "timeout", "illegal_move", "win_rate"}
-    check(all(fields <= set(e) for e in stats["engines"]) if stats["engines"] else True,
-          "分引擎统计含胜负/超时/非法/胜率字段")
+    fields = {"pid", "name", "engine", "version", "checkpoint",
+              "games", "win", "loss", "draw", "timeout", "illegal_move", "win_rate"}
+    participants = stats.get("participants") or []
+    check(all(fields <= set(e) for e in participants) if participants else True,
+          "分参赛方统计含身份、权重与胜负/超时/非法/胜率字段",
+          f"{len(participants)} 个参赛方")
+    check("records_on_disk" in stats and "records_in_memory" in stats,
+          "统计同时报告磁盘与内存中的记录条数")
 
 
 def test_batch_alternates_colors() -> None:
@@ -194,8 +203,9 @@ def test_batch_cancel() -> None:
     # 用足够多的局数保证中止请求到达时批次仍在进行（避免测试自身竞态）
     requested = 40
     status, batch = post("/api/batches", {
-        "black": "greedy", "white": "greedy", "games": requested,
-        "move_timeout_ms": 800, "game_timeout_ms": 60000,
+        "participants": {"black": {"engine": "greedy", "pid": "cancel-a"},
+                         "white": {"engine": "greedy", "pid": "cancel-b"}},
+        "games": requested, "move_timeout_ms": 800, "game_timeout_ms": 60000,
     })
     batch_id = batch["batch_id"]
     time.sleep(0.4)
@@ -219,15 +229,58 @@ def test_errors() -> None:
                                  {"black": "no-such-engine", "white": "random"})
     check(ok, "未知引擎返回 400", f"HTTP {code}")
 
-    ok, code = expect_http_error("/api/matches", 400, "POST",
-                                 {"black": "random", "white": "greedy", "board_size": 19})
+    ok, code = expect_http_error("/api/matches", 400, "POST", {
+        "participants": {"black": {"engine": "random", "pid": "x"},
+                         "white": {"engine": "random", "pid": "y"}},
+        "board_size": 19,
+    })
     check(ok, "非 15x15 的 board_size 被拒绝（前后端规则一致）", f"HTTP {code}")
+
+    ok, code = expect_http_error("/api/matches", 400, "POST", {
+        "participants": {"black": {"engine": "random", "pid": "same"},
+                         "white": {"engine": "random", "pid": "same"}},
+    })
+    check(ok, "双方使用相同参赛方 id 时被拒绝（避免自己打自己）", f"HTTP {code}")
+
+    ok, code = expect_http_error("/api/matches", 400, "POST", {
+        "participants": {"black": {"engine": "trained", "pid": "a",
+                                   "checkpoint": str(MODEL_A)},
+                         "white": {"engine": "trained", "pid": "b",
+                                   "checkpoint": str(MODEL_A)}},
+    })
+    check(ok, "模型接入点双方加载同一份权重且版本相同时被拒绝（无对比意义）", f"HTTP {code}")
+
+    ok, code = expect_http_error("/api/matches", 400, "POST", {
+        "participants": {"black": {"pid": "no-engine"}},
+    })
+    check(ok, "参赛方缺少 engine 字段时被拒绝", f"HTTP {code}")
 
     ok, code = expect_http_error("/api/games/g-does-not-exist", 404)
     check(ok, "不存在的对局返回 404", f"HTTP {code}")
 
     ok, code = expect_http_error("/api/batches/b-nope", 404)
     check(ok, "不存在的批次返回 404", f"HTTP {code}")
+
+
+def test_identity_in_api() -> None:
+    """同一适配器、不同权重与身份，通过接口创建时必须各自独立。"""
+    status, snap = post("/api/matches", {
+        "participants": {
+            "black": {"engine": "ckpt_test", "pid": "dsh", "version": "ta1",
+                      "checkpoint": str(MODEL_A)},
+            "white": {"engine": "ckpt_test", "pid": "codex", "version": "tb2",
+                      "checkpoint": str(MODEL_B)},
+        },
+        "move_timeout_ms": 2000, "game_timeout_ms": 60000, "seed": 31337,
+    })
+    game_id = snap["game_id"]
+    final, _ = wait_finished(game_id)
+    check(final is not None, "双身份对局能正常结束")
+    rec = get(f"/api/games/{game_id}")
+    check(rec["black"]["pid"] == "dsh" and rec["white"]["pid"] == "codex",
+          "接口接受 per-participant 权重并记录各自身份",
+          f"{rec['black']['pid']}({Path(rec['black']['checkpoint']).parent.name}) vs "
+          f"{rec['white']['pid']}({Path(rec['white']['checkpoint']).parent.name})")
 
 
 def main() -> int:
@@ -243,6 +296,7 @@ def main() -> int:
     test_list_vs_full_stats()
     test_batch_alternates_colors()
     test_batch_cancel()
+    test_identity_in_api()
     test_errors()
 
     failed = [r for r in results if not r[0]]

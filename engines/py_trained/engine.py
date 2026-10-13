@@ -27,7 +27,9 @@
 """
 
 import importlib.util
+import inspect
 import os
+import re
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -40,8 +42,6 @@ from engine_loop import Context, GameView, run  # noqa: E402
 EXIT_MODEL_FAILED = 2
 
 CHECKPOINT = os.environ.get("GOMOKU_MODEL") or ""
-# 仅在自检/演示时使用：允许占位 _infer() 参与，不用于任何真实比赛
-ALLOW_STUB = os.environ.get("GOMOKU_ALLOW_STUB") == "1"
 
 stderr = sys.stderr
 
@@ -132,7 +132,7 @@ class Policy:
         self.model = self._load(str(path))
         if self.model is None:
             _fail(f"_load() 未能加载模型: {checkpoint}（返回了 None）")
-        if not ALLOW_STUB and not type(self)._infer_implemented():
+        if not type(self)._infer_implemented():
             _fail(
                 "_infer() 尚未实现（仍是接入模板的占位实现）。"
                 "请在 engines/py_trained/engine.py 中实现 _load() 与 _infer() 后再指定 checkpoint。"
@@ -140,7 +140,32 @@ class Policy:
 
     @classmethod
     def _infer_implemented(cls) -> bool:
-        return cls._infer is not Policy._infer
+        """判断 _infer() 是否真被实现，而不是仍为模板占位。
+
+        直接看源码：子类覆盖检测对这种"就地改模板"的接入方式不起作用
+        （没有任何子类），未实现的 _infer 会永远通过检测。
+
+        注意：必须按"行首的方法定义"定位，不能按子串的首次出现 —— 本方法自己的
+        docstring 里就写着 _infer( 这样的字样，用子串切分会切到错误位置。
+        """
+        try:
+            source = inspect.getsource(cls)
+        except (OSError, TypeError):
+            return False
+        match = re.search(r"^    def _infer\(.*$", source, flags=re.MULTILINE)
+        if match is None:
+            return False
+        after = source[match.end():]
+        # 只取 _infer 自己的函数体：到下一个同级方法定义为止
+        next_def = re.search(r"^    def ", after, flags=re.MULTILINE)
+        segment = after[: next_def.start()] if next_def else after
+        if "TODO(训练侧)" in segment:
+            return False
+        # 去掉 docstring 与注释后，只剩 return None / pass 就说明它仍是占位实现
+        stripped = re.sub(r'"""(?:.|\n)*?"""', "", segment)
+        stripped = re.sub(r"#.*", "", stripped)
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        return any(line not in ("return None", "pass", ")") for line in lines)
 
     def _load(self, path: str):
         """TODO(训练侧)：加载模型并返回一个可调用对象。
